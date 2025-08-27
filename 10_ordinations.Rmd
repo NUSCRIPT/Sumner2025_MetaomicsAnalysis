@@ -1,0 +1,333 @@
+---
+title: "Ordinations"
+output:
+  html_document:
+    df_print: paged
+---
+```{r}
+source("src/common/load_metadata.r")
+source("src/common/get_distances.r")
+source('src/common/load_features.r')
+source("src/common/nature_theme.r")
+source('src/common/load_lists.r')
+source('src/common/get_clusters.r')
+library(viridis)
+library(tidyverse)
+```
+# Helper functions for ordination and plottingf
+```{r}
+
+# Takes distance matrix and requires global metadata as permmeta
+# RETURNS list obj of
+#   1) <ordination results> of type data frame, includes ordination with metadata linked
+#   2) <label eig.1> & <label eig.2> of type str that is the label for PCoA axes
+my_ordination_helper <- function(my_distance, my_meta=permmeta){
+  set.seed(200)
+  my_pcoa <- cmdscale(my_distance, k = 4, eig = TRUE, add = FALSE)
+  
+  # cleanup
+  my_ord <- as.data.frame(my_pcoa$points)
+  names(my_ord) <- c('pcoa1', 'pcoa2', 'pcoa3', 'pcoa4') ## rename coordinates
+  
+  # Percent explained variation
+  my_eig <- eigenvals(my_pcoa)
+  eig.percent <- 100*head(my_eig/sum(my_eig))
+  print(eig.percent)
+  eig.1 <- paste("PCo1 (", as.character(round(eig.percent[1], digits = 1)), "%)", sep = "")
+  eig.2 <-paste("PCo2 (", as.character(round(eig.percent[2], digits = 1)), "%)", sep = "")
+  
+  ## plot PCoA (FIGURE 1A)
+  my_meta_ord<- my_ord %>% 
+    rownames_to_column("sample_name") %>% 
+    left_join(my_meta) %>% mutate(sham = '21') # CHANGED PERMMETA
+  
+  ordination_results <- list('ord_obj' = my_meta_ord,
+                             'label_eig.1' = eig.1,
+                             'label_eig.2' = eig.2)
+  return(ordination_results)
+}
+
+
+# Takes ordination results output from 'my ordination helper' function and aesthetics
+# RETURNS ggplot object with aesthetic of fill and shape
+# <ordination_results> = list of 1) pcoa df, eigen label for x str, eigen label for y str
+# <fill_value> is string of column name to match aesthetic
+# <shape_value> is string of column name to match shape aes, if not in will only have 1 shape
+# <add_background_points> is bool; if T, adds background of light grey points for faceting help
+visualize_ordination <- function(ordination_results, fill_value, shape_value, 
+                                 size_value=2, stroke_value=.4, add_background_points=F){
+  
+  # Make arbitrary entry for shape_value if not present in order to have 'no shape' option
+  if (is.null(ordination_results[[1]][[shape_value]])) {
+    ordination_results[[1]][[shape_value]] <- 'Map'
+  }
+  
+  # Plot ordination
+  ggp <- ordination_results[[1]] %>%
+    arrange(!is.na(.data[[fill_value]]), .data[[fill_value]]) %>% # arrange plotting order, sort first by not na to put na on bottom layer
+    ggplot(.) +
+    {if(add_background_points)geom_point(data = ordination_results[[1]][1:4], aes(x=pcoa1, y=pcoa2), color='grey')}+
+    geom_point(aes(x = pcoa1, 
+                   y = pcoa2, 
+                   fill = .data[[fill_value]], 
+                   shape = .data[[shape_value]]), 
+               size = size_value, 
+               stroke = stroke_value) +
+    xlab(ordination_results[[2]]) +
+    ylab(ordination_results[[3]]) +
+    theme_nature() +
+    scale_shape_manual(values = c(21,22,23,24,25)) +
+    theme(aspect.ratio = 1,
+          axis.text.x = element_blank(), 
+          axis.ticks.x = element_blank(), 
+          axis.text.y = element_blank(), 
+          axis.ticks.y = element_blank()) 
+  
+  # map legend to continuous/categorical fill values
+  if (is.numeric(ordination_results[[1]][[fill_value]])) {
+    ggp <- ggp + guides(fill = guide_colorbar()) + scale_fill_viridis()
+  } else {
+    ggp <- ggp + guides(fill = guide_legend(override.aes=list(shape=21))) 
+    
+  }
+  
+  return(ggp)
+  
+}
+
+
+permmeta <- permmeta %>% left_join(
+  vegan::diversity(t(features_amp %>% column_to_rownames('feature')), index='invsimpson') %>% as_tibble(rownames = 'sample_name') %>% dplyr::rename(invsimpson_amp = 'value')
+)
+
+rm_labs <- list(scale_fill_viridis())
+```
+
+# Plot 
+## Figure 1: Pneumonia category
+```{r}
+
+plot_ordination_fig1 <- function(ordination_results){
+  # Disentangle plot and legend for easier plotting
+  # Takes a ggplot and return type list as list(ggplot, legend)
+  seperate_plot_legend <- function(a_ggplot){
+    p.leg <- as_ggplot(ggpubr::get_legend(a_ggplot + guides(shape='none'))) 
+    p.ggp <- a_ggplot + theme(legend.position = 'none')
+    return(list(my_ggp = p.ggp,
+                my_leg = p.leg))
+  }
+  
+  # Plot base functions
+  p1 <- (visualize_ordination(ordination_results, 'Episode_category', 'sham', 2.5) +scale_fill_manual(values=mox_color_lists[['Episode_category']])) %>% seperate_plot_legend(.)
+  p2 <- (visualize_ordination(ordination_results, 'Episode_is_cured', 'sham', 1, .15) + scale_fill_manual(values=mox_color_lists[['Episode_is_cured']]))  %>% seperate_plot_legend(.)
+  p3 <- visualize_ordination(ordination_results, 'invsimpson_amp', 'sham', 1, .15)  %>% seperate_plot_legend(.)
+  # p2 <- visualize_ordination(ordination_results_amp, 'Episode_etiology', 'Episode_category')%>% seperate_plot_legend(.)
+  p4 <- visualize_ordination(ordination_results, 'dysbiosis_score', 'sham', 1, .15)  %>% seperate_plot_legend(.)
+  p5 <- visualize_ordination(ordination_results, 'Quantity.Mean.Log', 'sham', 1, .2) %>% seperate_plot_legend(.)
+  p6 <- visualize_ordination(ordination_results, 'amylase_bf_log', 'sham', 1, .2) %>% seperate_plot_legend(.) 
+  
+  # Glom grid of plots
+  p_side <- cowplot::plot_grid(p2[[1]] + labs(y='', x='Resolution') + theme(axis.title.y=element_blank()), 
+                               p3[[1]] + labs(y='', x='Diversity') + theme(axis.title.y=element_blank()), 
+                               p4[[1]] + labs(y='', x='MDNP') + theme(axis.title.y=element_blank()),
+                               ncol=1) 
+  pall <- cowplot::plot_grid(p1[[1]], p_side, 
+                             ncol=2, 
+                             align = 'hv', 
+                             axis = 'b',
+                             rel_widths = c(2, 1),
+                             rel_heights = c(2, 1))
+  
+  # Glom grid of legends
+  p_side_legend <- cowplot::plot_grid(p2[[2]], p3[[2]], p4[[2]], ncol=1) 
+  pall_legend <- cowplot::plot_grid(p1[[2]], p_side_legend, 
+                                    ncol=2, 
+                                    align = 'hv', 
+                                    axis = 'b',
+                                    rel_widths = c(2, 1),
+                                    rel_heights = c(2, 1))
+  
+  return(list('plot' = pall, 'legend' = pall_legend))
+}
+# Ordinate amplicon data
+ordination_results_amp <- my_ordination_helper(mox_dist_list[['AMP [Genus]']]) 
+
+# Plot figures 1 ordinations
+ordination_fig1 <- plot_ordination_fig1(ordination_results_amp)
+ordination_fig1[[1]] # plots
+ordination_fig1[[2]] # legands
+
+# Save plots
+ggsave2(filename = 'figures/ordinations/ordination_fig1.pdf', plot=ordination_fig1[[1]], width=3.03, height=2.31) #3, 2.25
+ggsave2(filename = 'figures/ordinations/ordination_fig1_legends.pdf', plot=ordination_fig1[[2]], width=2.92, height=2.22) #3, 2.25
+saveRDS(ordination_fig1[[1]], file = 'objects/ordination_fig1.rds')
+
+```
+
+# Cluster ordination
+```{r}
+
+cluster_ordination <- function(ordination_results){
+  # Disentangle plot and legend for easier plotting
+  # Takes a ggplot and return type list as list(ggplot, legend)
+  # source('src/common/get_clusters.r')
+  seperate_plot_legend <- function(a_ggplot){
+    p.leg <- as_ggplot(ggpubr::get_legend(a_ggplot)) 
+    p.ggp <- a_ggplot + theme(legend.position = 'none')
+    return(list(my_ggp = p.ggp,
+                my_leg = p.leg))
+  }
+  p1 <- (visualize_ordination(ordination_results, 'cluster_num_amplicon', 'sham', 2.5) +
+           scale_fill_manual(values=mox_color_lists[['cluster_num_amplicon']])) %>% 
+    seperate_plot_legend(.)
+  return(p1)
+}
+cluster_pcoa <- cluster_ordination(ordination_results_amp)
+cluster_pcoa
+ggsave("figures/pneumotypes/basic_ordination.pdf", cluster_pcoa[[1]],units="in", height=1.68, width = 1.78)
+ggsave("figures/pneumotypes/basic_ordination_key.pdf", cluster_pcoa[[2]],units="in", height=1.68, width = 1.78)
+
+saveRDS(cluster_pcoa[[1]], file = 'objects/cluster_pcoa.rds')
+```
+
+## Ordination Overviews 
+```{r}
+add_title <- function(ggp, title_name){
+  ggp <- ggp + 
+    ggtitle(title_name) +
+    theme(plot.title = element_text(size = 6),
+          plot.title.position = "panel")
+  return(ggp)
+}
+
+library(ggh4x)
+library(ghibli)
+library(patchwork)
+
+# Amplicon
+ordination_results_amp <- my_ordination_helper(mox_dist_list[['AMP [Genus]']], my_meta = permmeta) 
+# ordination_results_amp <- my_ordination_helper(mox_dist_list[['Amplicon ASV']]) 
+amp_facets <- list(
+  visualize_ordination(ordination_results_amp, 'Episode_category', 'sham', 1.5, add_background_points = T) +  scale_fill_manual(values=mox_color_lists[['Episode_category']])  + facet_wrap2(~Episode_category, axes='all', ncol=1),
+  visualize_ordination(ordination_results_amp, 'Episode_etiology', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +facet_wrap2(~Episode_etiology, axes='all', ncol=1),
+  visualize_ordination(ordination_results_amp, 'Episode_is_cured', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']])  +facet_wrap2(~Episode_is_cured, axes='all', ncol=1)
+)
+amp_facets <- lapply(amp_facets, add_title, title_name="AMP\n[Genus]")
+
+visualize_ordination(ordination_results_amp, 'Quantity.Mean.Log', 'sham', 2, add_background_points = T) 
+
+# Amplicon ASV
+ordination_results_amp_asv <- my_ordination_helper(mox_dist_list[['AMP [ASV]']], my_meta = permmeta) 
+# ordination_results_amp <- my_ordination_helper(mox_dist_list[['Amplicon ASV']]) 
+amp_facets_asv <- list(
+  visualize_ordination(ordination_results_amp_asv, 'Episode_category', 'sham', 1.5, add_background_points = T) +  scale_fill_manual(values=mox_color_lists[['Episode_category']])  + facet_wrap2(~Episode_category, axes='all', ncol=1),
+  visualize_ordination(ordination_results_amp_asv, 'Episode_etiology', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +facet_wrap2(~Episode_etiology, axes='all', ncol=1),
+  visualize_ordination(ordination_results_amp_asv, 'Episode_is_cured', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']])  +facet_wrap2(~Episode_is_cured, axes='all', ncol=1)
+)
+amp_facets_asv <- lapply(amp_facets_asv, add_title, title_name="AMP\n[ASV]")
+
+# amp_facets_asv[[1]] 
+visualize_ordination(ordination_results_amp_asv, 'Quantity.Mean.Log', 'sham', 2, add_background_points = T) 
+
+
+# MGX
+ordination_results_mgx <- my_ordination_helper(mox_dist_list[["DNA [Taxonomy]"]], my_meta = permmeta)  
+
+mgx_facets <- list(
+  visualize_ordination(ordination_results_mgx, 'Episode_category', 'sham', 1.5, add_background_points = T)  + scale_fill_manual(values=mox_color_lists[['Episode_category']])  + facet_wrap2(~Episode_category, axes='all', ncol=1),
+  visualize_ordination(ordination_results_mgx, 'Episode_etiology', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +facet_wrap2(~Episode_etiology, axes='all', ncol=1),
+  visualize_ordination(ordination_results_mgx, 'Episode_is_cured', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']])  +facet_wrap2(~Episode_is_cured, axes='all', ncol=1)
+)
+mgx_facets <- lapply(mgx_facets, add_title, title_name="DNA\n[Taxonomy]")
+
+# MGC KO
+ordination_results_ko <- my_ordination_helper(mox_dist_list[["DNA [PFAM]"]], my_meta = permmeta) 
+
+ko_facets <- list(
+  visualize_ordination(ordination_results_ko, 'Episode_category', 'sham', 1.5, add_background_points = T)  + scale_fill_manual(values=mox_color_lists[['Episode_category']])  + facet_wrap2(~Episode_category, axes='all', ncol=1),
+  visualize_ordination(ordination_results_ko, 'Episode_etiology', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +facet_wrap2(~Episode_etiology, axes='all', ncol=1),
+  visualize_ordination(ordination_results_ko, 'Episode_is_cured', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']])  +facet_wrap2(~Episode_is_cured, axes='all', ncol=1)
+)
+ko_facets <- lapply(ko_facets, add_title, title_name="DNA\n[KO]")
+
+# MGC Viral
+ordination_results_viral <- my_ordination_helper(mox_dist_list[["DNA [Viral]"]], my_meta = permmeta) 
+
+viral_facets <- list(
+  visualize_ordination(ordination_results_viral, 'Episode_category', 'sham', 1.5, add_background_points = T)  + scale_fill_manual(values=mox_color_lists[['Episode_category']])  + facet_wrap2(~Episode_category, axes='all', ncol=1),
+  visualize_ordination(ordination_results_viral, 'Episode_etiology', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +facet_wrap2(~Episode_etiology, axes='all', ncol=1),
+  visualize_ordination(ordination_results_viral, 'Episode_is_cured', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']])  +facet_wrap2(~Episode_is_cured, axes='all', ncol=1)
+)
+viral_facets <- lapply(viral_facets, add_title, title_name="DNA\n[Viral]")
+
+# MTX
+ordination_results_mtx <- my_ordination_helper(as.dist(mox_dist_list[["RNA [Taxonomy BKN]"]]), my_meta = permmeta) 
+
+mtx_facets <- list(
+  visualize_ordination(ordination_results_mtx, 'Episode_category', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_category']])  + facet_wrap2(~Episode_category, axes='all', ncol=1),
+  visualize_ordination(ordination_results_mtx, 'Episode_etiology', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +facet_wrap2(~Episode_etiology, axes='all', ncol=1),
+  visualize_ordination(ordination_results_mtx, 'Episode_is_cured', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']])  +facet_wrap2(~Episode_is_cured, axes='all', ncol=1)
+)
+mtx_facets <- lapply(mtx_facets, add_title, title_name="RNA\n[Taxonomy BKN]")
+
+# MTX
+ordination_results_mtx_pfam <- my_ordination_helper(as.dist(mox_dist_list[["RNA [PFAM]"]]), my_meta = permmeta) 
+
+mtx_pfam_facets <- list(
+  visualize_ordination(ordination_results_mtx_pfam, 'Episode_category', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_category']])  + facet_wrap2(~Episode_category, axes='all', ncol=1),
+  visualize_ordination(ordination_results_mtx_pfam, 'Episode_etiology', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +facet_wrap2(~Episode_etiology, axes='all', ncol=1),
+  visualize_ordination(ordination_results_mtx_pfam, 'Episode_is_cured', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']])  +facet_wrap2(~Episode_is_cured, axes='all', ncol=1)
+)
+mtx_pfam_facets <- lapply(mtx_pfam_facets, add_title, title_name="RNA\n[PFAM]")
+
+
+# HTX
+ordination_results_htx <- my_ordination_helper(as.dist(mox_dist_list[["RNA [Host Transcriptomics]"]]), my_meta = permmeta) 
+
+htx_facets <- list(
+  visualize_ordination(ordination_results_htx, 'Episode_category', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_category']])  + facet_wrap2(~Episode_category, axes='all', ncol=1),
+  visualize_ordination(ordination_results_htx, 'Episode_etiology', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +facet_wrap2(~Episode_etiology, axes='all', ncol=1),
+  visualize_ordination(ordination_results_htx, 'Episode_is_cured', 'sham', 1.5, add_background_points = T)  +  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']])  +facet_wrap2(~Episode_is_cured, axes='all', ncol=1)
+)
+htx_facets <- lapply(htx_facets, add_title, title_name="RNA\n[Host Transcriptomics]")
+
+p_category <- amp_facets[[1]] + mgx_facets[[1]] + ko_facets[[1]] + viral_facets[[1]] + mtx_facets[[1]]+ mtx_pfam_facets[[1]] + htx_facets[[1]] + 
+  guide_area() + 
+  plot_annotation(tag_levels = 'a') + 
+  plot_layout(nrow = 1, guides = "collect") & theme(strip.text.x = element_blank()) &
+  guides(shape='none')
+p_category
+
+p_etiology <- amp_facets[[2]] + mgx_facets[[2]] + ko_facets[[2]] + viral_facets[[2]] + mtx_facets[[2]] + mtx_pfam_facets[[2]] + htx_facets[[2]] + 
+  guide_area() + 
+  plot_annotation(tag_levels = 'a') + 
+  plot_layout(nrow = 1, guides = "collect") & theme(strip.text.x = element_blank()) &
+  guides(shape='none')
+
+p_etiology
+
+p_outcome <- amp_facets[[3]] + mgx_facets[[3]] + ko_facets[[3]] + viral_facets[[3]] + mtx_facets[[3]] + mtx_pfam_facets[[3]] + htx_facets[[3]] + 
+  guide_area() + 
+  plot_annotation(tag_levels = 'a') + 
+  plot_layout(nrow = 1, guides = "collect") & theme(strip.text.x = element_blank()) &
+  guides(shape='none')#& theme(legend.position = 'right') 
+
+p_outcome
+
+
+ggsave('figures/ordinations/supplemental_ordination_mox_category.pdf', p_category, units='in', width=6.906667, height=3.30)
+
+ggsave('figures/ordinations/supplemental_ordination_mox_etiology.pdf', p_etiology,  units='in', width=6.906667, height=3.80)
+
+ggsave('figures/ordinations/supplemental_ordination_mox_outcome.pdf', p_outcome,units='in', width=6.906667, height=3.30)
+
+source('src/common/get_distances.r')
+```
+```{r}
+# For other plot
+upright_amp <- visualize_ordination(ordination_results_amp, 'Episode_category', 'sham', 1.5, add_background_points = T) +  
+  scale_fill_manual(values=mox_color_lists[['Episode_category']])  + facet_wrap2(~Episode_category, axes='all', ncol=2)
+
+saveRDS(upright_amp,'objects/figure_objects/ordination_outcome.rds')
+
+```

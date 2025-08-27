@@ -1,0 +1,57 @@
+---
+title: "MANTEL Analysis"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+source("src/common/mantel_test_functions.R", echo=TRUE)
+source("src/common/load_features.r")
+source("src/common/load_metadata.r")
+source("src/common/get_distances.r")
+drop_samples()
+```
+
+```{r}
+distance_of_interest <- c("AMP [Genus]", "AMP [ASV]", "DNA [Taxonomy]", "DNA [Viral]", 
+                          "RNA [Taxonomy BKN]", "DNA [PFAM]", "RNA [PFAM]", 
+                          "RNA [Host Transcriptomics]", "CFU [Culture]")
+mox_dist_list <- mox_dist_list[distance_of_interest]
+
+names(mox_dist_list) %>% dput()
+set.seed(104321)
+all_mantel_results <- run_mantel_list(mox_dist_list, names(mox_dist_list))
+mantel_clean <- get_clean_mantel(all_mantel_results) 
+mantel_heat <- mantel_clean %>%  plot_mantel_heat()
+mantel_heat 
+ggsave('figures/mantel_heat.pdf', mantel_heat,  width = 4.3, height = 2.35, units = "in")
+saveRDS(object = mantel_heat,'objects/figure_objects/mantel_heat.rds')
+write_tsv(mantel_clean, file = "tables/mantel_tests.tsv")
+
+```
+```{r}
+set.seed(104321)
+
+subset_distances <- function(distance_matrix, sample_list){
+  present_distance <- labels(distance_matrix)[labels(distance_matrix) %in% sample_list]
+  distance_matrix <- dist_subset(distance_matrix, present_distance)
+  return(distance_matrix)
+}
+
+baseline_samples <- permmeta %>% 
+  filter(baseline_or_bal == "Baseline") %>% 
+  pluck("sample_name")
+
+baseline_distances_only <- lapply(mox_dist_list, 
+                                  subset_distances, 
+                                  sample_list=baseline_samples)
+
+baseline_mantel_results <- run_mantel_list(baseline_distances_only, names(baseline_distances_only))
+mantel_clean_baseline <- get_clean_mantel(baseline_mantel_results) 
+mantel_heat_baseline <- mantel_clean_baseline %>%  plot_mantel_heat()
+mantel_heat_baseline
+ggsave('figures/mantel_baseline_heat.pdf', mantel_heat_baseline,  width = 4.3, height = 2.35, units = "in")
+saveRDS(object = mantel_heat_baseline,'objects/figure_objects/mantel_heat_baseline.rds')
+write_tsv(mantel_clean_baseline, file = "tables/mantel_baseline_tests.tsv")
+```

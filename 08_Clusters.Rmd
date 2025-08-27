@@ -1,0 +1,1210 @@
+---
+title: ' Clusters & Pneumotypes'
+output:
+    html_document:
+    toc: yes
+editor_options: 
+    chunk_output_type: console
+---
+```{r}
+source('src/common/load_metadata.r')
+source('src/common/load_features.r')
+source('src/common/load_lists.r')
+source('src/common/nature_theme.r')
+source('src/common/graph_features.r')
+source('src/common/graph_violin.r')
+library(ggridges)
+```
+
+
+# HEATMAPS
+## Diagnosis Distribution Heatmap
+```{r}
+library(viridis)
+library(rstatix)
+
+# PURPOSE: plot diagnosis heatmap for pneumotype distribution
+plot_heatmap_diagnosis <- function(only_baseline=F, plot_binom = F, plot_chisq = F){
+  set.seed(100)
+  # STEP1: Prep metadata for plotting
+  tab.diagnosis <- permmeta %>% 
+    drop_na(cluster_num_amplicon) %>% 
+    filter(!Patient_id %in% c(REDACTEDA,REDACTEDB,REDACTEDC)) 
+  
+  # Optionally, limit to baseline samples only
+  if (only_baseline){
+    tab.diagnosis <- tab.diagnosis %>% filter(baseline_or_bal == 'Baseline') 
+  }
+  
+  # Calculate summary stats for cleaning (frequency and n)
+  tab.diagnosis <- tab.diagnosis %>% 
+    dplyr::group_by(Episode_category, cluster_num_amplicon) %>%
+    summarise(count=n()) %>% 
+    ungroup() %>%
+    dplyr::group_by(Episode_category) %>%
+    mutate(freq = count/sum(count)) %>%
+    mutate(zscale_count = scale(count)) %>% # Not used in plot
+    ungroup() %>% 
+    mutate(lblcolor = case_when(freq > 0.2 ~ 'black', .default = 'white'))
+  
+  # STEP2: Distribution statistics
+  # Get expected distribution based on npc OR neutral
+  expected.p <- tab.diagnosis %>% 
+    filter(Episode_category =='NPC') %>%
+    group_by(cluster_num_amplicon) %>% 
+    summarize(count=sum(count)) %>% #
+    mutate(freq = count/sum(count)) %>% 
+    pull(freq, cluster_num_amplicon) # Make named list
+  # OR use below line if to null
+  expected.p <- c(0.25, 0.25, 0.25, 0.25) # NULL distribution
+  
+  print(c('Expected P: ', expected.p))
+  
+  label_nudge_y = 0
+  
+  # Run relevant statistical test
+  if (plot_chisq){
+    
+    print('Executing Chisquare')
+    chisq <- tab.diagnosis %>% 
+      select(Episode_category, cluster_num_amplicon, count, freq) %>% 
+      group_by(Episode_category) %>% 
+      select(cluster_num_amplicon, count) %>% 
+      summarise(
+        data = list(pairwise_chisq_test_against_p(
+          count, 
+          p=expected.p,
+          p.adjust.method = "fdr",
+          simulate.p.value = TRUE,  
+          B=1e3)
+        ),
+        cluster_num_amplicon = list(cluster_num_amplicon)) %>%  
+      unnest_wider(data) %>%  
+      unnest(c(group:p.adj.signif, cluster_num_amplicon)) %>% 
+      mutate(p.adj.overall = p.adjust(p, method='fdr')) %>% 
+      add_significance(p.col = "p.adj",
+                       output.col = 'p.adj.overall.signif',
+                       cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                       symbols = c("***", "**", "*", "")
+      )
+    
+    print(chisq, n=Inf)
+    
+    tab.diagnosis <- tab.diagnosis %>% left_join(chisq)
+    
+    label_nudge_y = -.12
+    
+  } else if (plot_binom) {
+    
+    print('Executing Binomial')
+    binom <- tab.diagnosis %>% 
+      select(Episode_category, cluster_num_amplicon, count, freq) %>% 
+      dplyr::group_by(Episode_category) %>% 
+      select(Episode_category, count, cluster_num_amplicon) %>%
+      summarise(
+        data = list(
+          pairwise_binom_test_against_p(
+            deframe(select(cur_data_all(), cluster_num_amplicon,count)),
+            alternative = "two.sided", #"greater",
+            p= expected.p,
+            p.adjust.method = "fdr")),
+        cluster_num_amplicon = list(cluster_num_amplicon)
+      ) %>%  
+      unnest_wider(data) %>%  
+      unnest(c(group:p.adj.signif,cluster_num_amplicon)) %>% 
+      mutate(p.adj.overall = p.adjust(p, method='fdr')) %>% # Column wise or global? Columns are indep.
+      add_significance(p.col = "p.adj", 
+                       output.col = 'p.adj.signif',
+                       cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                       symbols = c("***", "**", "*", ""))
+    
+    # Print results + combine
+    print(binom, n=Inf)
+    
+    tab.diagnosis <- tab.diagnosis %>% left_join(binom)
+    
+    label_nudge_y = -.12
+  }
+  
+  # Plot
+  p.HeatDistribution <- ggplot(tab.diagnosis, aes(x = Episode_category, 
+                                                  y = cluster_num_amplicon,
+                                                  fill = freq)) +
+    geom_tile(color = "black", linewidth=.2, width=.9) + #.9
+    geom_text(aes(label=count, color=lblcolor), size=6/.pt, nudge_y = label_nudge_y) +
+    guides(fill = guide_colourbar(label = TRUE,
+                                  ticks = FALSE,
+                                  title = "Frequency",
+                                  frame.linewidth=.2,
+                                  frame.colour="black",
+                                  ticks.colour = "black",
+                                  title.position="top")) +
+    theme_nature() +
+    scale_fill_viridis() + #limits=c(0,1)) + 
+    labs(x="Pneumonia diagnosis", 
+         y="Microbiota state") + 
+    theme(aspect.ratio = 1.2) +
+    scale_color_manual(values=c(white="white", black="black")) +
+    guides(color='none')
+  
+  if (plot_binom | plot_chisq){
+    p.HeatDistribution <- p.HeatDistribution + 
+      geom_text(aes(label=p.adj.signif, color=lblcolor), size=6/.pt, nudge_y = -label_nudge_y)
+  }
+  return(p.HeatDistribution)
+}
+
+p.HeatDistribution.All <- plot_heatmap_diagnosis(only_baseline = F, plot_binom=T, plot_chisq = F)
+p.HeatDistribution.All
+
+p.HeatDistribution <- plot_heatmap_diagnosis(only_baseline = T, plot_binom=T, plot_chisq = F)
+p.HeatDistribution
+
+ggsave(filename = 'figures/pneumotypes/04A_DiagnosisHeatAll.pdf',  plot =p.HeatDistribution.All, units='in', width=1.46, height=1.04)
+ggsave(filename = 'figures/pneumotypes/04B_DiagnosisHeatBaseline.pdf',  plot = p.HeatDistribution, units='in', width=1.46, height=1.04)
+
+
+
+```
+
+## Outcome Distribution Heatmap
+
+```{r}
+library(ggh4x)
+# PURPOSE: plot clinical outcome heatmap faceted by pneumonia
+plot_heatmap_outcome <- function(only_baseline = F, plot_binom = F, plot_chisq = F){
+  
+  set.seed(100)
+  
+  # STEP1: Clean metadata for plotting
+  success.heat.dt <- permmeta %>%
+    drop_na(cluster_num_amplicon) %>%
+    filter(!script_id %in% c(REDACTEDA,REDACTEDB,REDACTEDC)) %>% # drop npc that get pneumonia at later tie point
+    select(sample_name, cluster_num_amplicon, Episode_category, Episode_is_cured, baseline_or_bal) %>%
+    mutate(Episode_is_cured = case_when(Episode_is_cured == 'Not cured' ~ "-", 
+                                        Episode_is_cured == 'Indeterminate' ~ "+/-", 
+                                        Episode_is_cured == 'Cured' ~ "+", 
+                                        .default='npc')) %>% # NON NPC RESOLUTION
+    filter(Episode_is_cured != 'npc') %>%
+    mutate(Episode_category = factor(Episode_category, levels=c("HAP", "VAP","CAP", "NPC")))
+  
+  # Optionally, limit to baseline samples only
+  if (only_baseline){
+    success.heat.dt <- success.heat.dt %>% filter(baseline_or_bal == 'Baseline') 
+  }
+  
+  # Calculate summary stats for cleaning (frequency and n)
+  success.heat.dt <- success.heat.dt %>%
+    dplyr::group_by(Episode_category, cluster_num_amplicon, Episode_is_cured) %>%
+    summarise(count=n()) %>% 
+    ungroup() %>%
+    complete(Episode_category, cluster_num_amplicon, Episode_is_cured, fill=list(count=0)) %>% # fill any zero values w tidy complete
+    dplyr::group_by(Episode_category,cluster_num_amplicon) %>%
+    mutate(freq = count/sum(count)) %>%
+    ungroup() %>% 
+    mutate(zscale_count = scale(freq)) %>%
+    mutate(lblcolor = case_when(freq > .6 ~ 'black', .default = 'white')) %>% 
+    filter(Episode_category != "NPC") # NON NPC RESOLUTION
+  
+  # STEP2: Statistics
+  # Get baseline outcomes
+  expected.p <- success.heat.dt %>% 
+    filter(Episode_category =='CAP') %>%
+    group_by(Episode_is_cured) %>% 
+    summarize(count=sum(count)) %>% #
+    mutate(freq = count/sum(count)) %>% 
+    arrange(desc(Episode_is_cured)) %>% 
+    pull(freq, Episode_is_cured) # Make named list
+  # expected.p <- c(0.375,0.625) # CAP distribution
+  expected.p <- c(1/3,1/3,1/3) # NULL distribution
+  print(c('Expected P: ', expected.p))
+  
+  
+  label_nudge_y = 0
+  # return(success.heat.dt)
+  if (plot_binom) {
+    binom <- success.heat.dt %>%
+      filter(Episode_category != 'NPC') %>% # NON NPC RESOLUTION
+      select(Episode_category,cluster_num_amplicon, Episode_is_cured, count) %>% 
+      dplyr::group_by(Episode_category, cluster_num_amplicon) %>%  #Episode_category, cluster_num_amplicon 
+      select(Episode_category, count, cluster_num_amplicon, Episode_is_cured) %>% 
+      summarise(
+        data = list(
+          pairwise_binom_test_against_p(
+            deframe(select(cur_data_all(), Episode_is_cured, count)), #cluster_num_amplicon,Episode_is_cured
+            alternative = "two.sided", #"greater",
+            p = expected.p,
+            p.adjust.method = "fdr"
+          )),
+        Episode_is_cured = list(Episode_is_cured),
+        cluster_num_amplicon = list(cluster_num_amplicon)
+      ) %>%  
+      unnest_wider(data) %>%  
+      unnest(c(group:p.adj.signif,Episode_is_cured,cluster_num_amplicon)) %>% 
+      mutate(p.adj.overall = p.adjust(p, method='fdr')) %>% 
+      add_significance(p.col = "p.adj", # Column wise or global?
+                       output.col = 'p.adj.overall.signif',
+                       cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                       symbols = c("***", "**", "*", ""))
+    # print(binom)
+    
+    # Combine
+    success.heat.dt <- success.heat.dt %>% left_join(binom)
+    
+    label_nudge_y = -.12
+  }
+  
+  print(success.heat.dt, n=Inf)
+  
+  # STEP3: PLOT!
+  p.success.heat<- success.heat.dt %>% 
+    ggplot(., aes(x = cluster_num_amplicon,
+                  y = Episode_is_cured,
+                  fill = freq)) +
+    geom_tile(color = "black", linewidth=.2, width=.9) + #.9
+    geom_text(aes(label=count, color = lblcolor), size=6/.pt, nudge_y = label_nudge_y) +
+    guides(fill = guide_colourbar(label = TRUE,
+                                  ticks = FALSE,
+                                  title = "Frequency",
+                                  frame.linewidth=.2,
+                                  frame.colour="black",
+                                  ticks.colour = "black",
+                                  title.position="top")) +
+    theme_nature()+
+    scale_fill_viridis() + 
+    labs(x="Microbiota state", 
+         y="Pneumonia outcome") + 
+    facet_wrap2(~Episode_category, nrow=3, axes='all',remove_labels = 'x') +
+    theme(aspect.ratio = .9,
+          panel.background = element_blank(),
+          strip.background = element_blank(),
+          panel.spacing = unit(0, 'pt'),
+    ) +
+    scale_color_manual(values=c(white="white", black="black")) +
+    guides(color='none')
+  
+  if (plot_binom | plot_chisq){
+    p.success.heat <- p.success.heat + 
+      geom_text(aes(label=p.adj.overall.signif, color=lblcolor), size=6/.pt, nudge_y = -label_nudge_y)
+  }
+  
+  return(p.success.heat)
+  
+}
+
+p.success.heat <- plot_heatmap_outcome(F, plot_binom  = T) 
+p.success.heat
+
+
+p.success.heat.baseline <-plot_heatmap_outcome(T, plot_binom = T)
+p.success.heat.baseline
+
+ggsave(filename = 'figures/pneumotypes/05A_OutcomeHeatAll.pdf', plot = p.success.heat, units='in', width = 1.53, height=1.82)
+ggsave(filename = 'figures/pneumotypes/05B_OutcomeHeatBaseline.pdf', plot = p.success.heat.baseline, units='in', width = 1.53, height=1.82)
+
+```
+
+
+## Etiology Distribution Heatmap
+```{r}
+library(viridis)
+library(rstatix)
+
+# PURPOSE: plot etiology heatmap for pneumotype distribution
+plot_heatmap_etiology <- function(only_baseline=F, plot_binom = F, plot_chisq = F){
+  set.seed(100)
+  # STEP1: Prep metadata for plotting
+  tab.diagnosis <- permmeta %>% 
+    drop_na(cluster_num_amplicon) %>% 
+    filter(!script_id %in% c(REDACTEDA,REDACTEDB,REDACTEDC)) %>% # drop npc that get pneumonia and lung transplant
+    mutate(Episode_etiology = factor(Episode_etiology, levels=c("Bacterial",
+                                                                "Viral",
+                                                                "Bacterial/viral",
+                                                                "Culture-negative",
+                                                                "NPC"))) %>% 
+    arrange()
+  
+  
+  # Optionally, limit to baseline samples only
+  if (only_baseline){
+    tab.diagnosis <- tab.diagnosis %>% filter(baseline_or_bal == 'Baseline') 
+  }
+  
+  # Calculate summary stats for cleaning (frequency and n)
+  tab.diagnosis <- tab.diagnosis %>% 
+    dplyr::group_by(Episode_etiology, cluster_num_amplicon) %>%
+    summarise(count=n()) %>% 
+    ungroup() %>%
+    dplyr::group_by(Episode_etiology) %>%
+    mutate(freq = count/sum(count)) %>%
+    mutate(zscale_count = scale(count)) %>% # Not used in plot
+    ungroup() %>% 
+    mutate(lblcolor = case_when(freq > 0.2 ~ 'black', .default = 'white'))
+  # print(tab.diagnosis, n=Inf)
+  
+  # STEP2: Distribution statistics
+  # Get expected distribution based on npc OR neutral
+  expected.p <- tab.diagnosis %>% 
+    filter(Episode_etiology =='NPC') %>%
+    group_by(cluster_num_amplicon) %>% 
+    summarize(count=sum(count)) %>% #
+    mutate(freq = count/sum(count)) %>% 
+    pull(freq, cluster_num_amplicon) # Make named list
+  # OR use below line if to null
+  # expected.p <- c(0.25, 0.25, 0.25, 0.25) # NULL distribution
+  
+  print(c('Expected P: ', expected.p))
+  
+  label_nudge_y = 0
+  
+  # Run relevant statistical test
+  if (plot_chisq){
+    
+    print('Executing Chisquare')
+    chisq <- tab.diagnosis %>% 
+      select(Episode_etiology, cluster_num_amplicon, count, freq) %>% 
+      group_by(Episode_etiology) %>% 
+      select(cluster_num_amplicon, count) %>% 
+      summarise(
+        data = list(pairwise_chisq_test_against_p(
+          count, 
+          p=expected.p,
+          p.adjust.method = "fdr",
+          simulate.p.value = TRUE,  
+          B=1e3)
+        ),
+        cluster_num_amplicon = list(cluster_num_amplicon)) %>%  
+      unnest_wider(data) %>%  
+      unnest(c(group:p.adj.signif, cluster_num_amplicon)) %>% 
+      mutate(p.adj.overall = p.adjust(p, method='fdr')) %>% 
+      add_significance(p.col = "p.adj",
+                       output.col = 'p.adj.overall.signif',
+                       cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                       symbols = c("***", "**", "*", "")
+      )
+    
+    print(chisq, n=Inf)
+    
+    tab.diagnosis <- tab.diagnosis %>% left_join(chisq)
+    
+    label_nudge_y = -.12
+    
+  } else if (plot_binom) {
+    
+    print('Executing Binomial')
+    binom <- tab.diagnosis %>% 
+      select(Episode_etiology, cluster_num_amplicon, count, freq) %>% 
+      dplyr::group_by(Episode_etiology) %>% 
+      select(Episode_etiology, count, cluster_num_amplicon) %>%
+      summarise(
+        data = list(
+          pairwise_binom_test_against_p(
+            deframe(select(cur_data_all(), cluster_num_amplicon,count)),
+            alternative = "greater", #"greater",
+            p= expected.p,
+            p.adjust.method = "fdr")),
+        cluster_num_amplicon = list(cluster_num_amplicon)
+      ) %>%  
+      unnest_wider(data) %>%  
+      unnest(c(group:p.adj.signif,cluster_num_amplicon)) %>% 
+      mutate(p.adj.overall = p.adjust(p, method='fdr')) %>% # Column wise or global? Columns are indep.
+      add_significance(p.col = "p.adj", 
+                       output.col = 'p.adj.signif',
+                       cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                       symbols = c("***", "**", "*", ""))
+    
+    # Print results + combine
+    print(binom, n=Inf)
+    
+    tab.diagnosis <- tab.diagnosis %>% left_join(binom)
+    
+    label_nudge_y = -.12
+  }
+  
+  # Plot
+  p.HeatDistribution <- ggplot(tab.diagnosis, aes(x = Episode_etiology, 
+                                                  y = cluster_num_amplicon,
+                                                  fill = freq)) +
+    geom_tile(color = "black", linewidth=.2, width=.9) + #.9
+    geom_text(aes(label=count, color=lblcolor), size=6/.pt, nudge_y = label_nudge_y) +
+    guides(fill = guide_colourbar(label = TRUE,
+                                  ticks = FALSE,
+                                  title = "Frequency",
+                                  frame.linewidth=.2,
+                                  frame.colour="black",
+                                  ticks.colour = "black",
+                                  title.position="top")) +
+    theme_nature() +
+    scale_fill_viridis() + #limits=c(0,1)) + 
+    labs(x="Pneumonia diagnosis", 
+         y="Microbiota state") + 
+    theme(aspect.ratio = 1.2) +
+    scale_color_manual(values=c(white="white", black="black")) +
+    guides(color='none')
+  
+  if (plot_binom | plot_chisq){
+    p.HeatDistribution <- p.HeatDistribution + 
+      geom_text(aes(label=p.adj.signif, color=lblcolor), size=6/.pt, nudge_y = -label_nudge_y)
+  }
+  return(p.HeatDistribution)
+}
+
+p.HeatDistributionEtiology.All <- plot_heatmap_etiology(only_baseline = F, plot_binom=T, plot_chisq = F)
+p.HeatDistributionEtiology.All
+
+p.HeatDistributionEtiology <- plot_heatmap_etiology(only_baseline = T, plot_binom=T, plot_chisq = F)
+p.HeatDistributionEtiology
+
+ggsave(filename = 'figures/pneumotypes/04A_EtiologyHeatAll.pdf',  plot =p.HeatDistributionEtiology.All, units='in', width=1.46, height=1.04)
+ggsave(filename = 'figures/pneumotypes/04B_EtiologyHeatBaseline.pdf',  plot = p.HeatDistributionEtiology, units='in', width=1.46, height=1.04)
+
+
+```
+
+## EtiologyxOutcome Distribution Heatmap
+
+```{r}
+library(ggh4x)
+# PURPOSE: plot clinical outcome heatmap faceted by pneumonia
+plot_heatmap_etiology <- function(only_baseline = F, plot_binom = F, plot_chisq = F){
+  
+  set.seed(100)
+  
+  # STEP1: Clean metadata for plotting
+  success.heat.dt <- permmeta %>%
+    drop_na(cluster_num_amplicon) %>%
+    filter(!script_id %in% c(REDACTEDA,REDACTEDB,REDACTEDC)) %>% # drop npc that get pneumonia and lung transplant
+    select(sample_name, cluster_num_amplicon, Episode_etiology, Episode_is_cured, baseline_or_bal) %>%
+    mutate(Episode_is_cured = case_when(Episode_is_cured == 'Not cured' ~ "-", 
+                                        Episode_is_cured == 'Indeterminate' ~ "+/-", 
+                                        Episode_is_cured == 'Cured' ~ "+", 
+                                        .default='npc')) %>% # NON NPC RESOLUTION
+    filter(Episode_is_cured != 'npc') %>%
+    mutate(Episode_etiology = factor(Episode_etiology, levels=c("Bacterial",
+                                                                "Viral",
+                                                                "Bacterial/viral",
+                                                                "Culture-negative",
+                                                                "NPC")))
+  
+  # Optionally, limit to baseline samples only
+  if (only_baseline){
+    success.heat.dt <- success.heat.dt %>% filter(baseline_or_bal == 'Baseline') 
+  }
+  
+  # Calculate summary stats for cleaning (frequency and n)
+  success.heat.dt <- success.heat.dt %>%
+    dplyr::group_by(Episode_etiology, cluster_num_amplicon, Episode_is_cured) %>%
+    summarise(count=n()) %>% 
+    ungroup() %>%
+    complete(Episode_etiology, cluster_num_amplicon, Episode_is_cured, fill=list(count=0)) %>% # fill any zero values w tidy complete
+    dplyr::group_by(Episode_etiology,cluster_num_amplicon) %>%
+    mutate(freq = count/sum(count)) %>%
+    ungroup() %>% 
+    mutate(zscale_count = scale(freq)) %>%
+    mutate(lblcolor = case_when(freq > .6 ~ 'black', .default = 'white')) %>% 
+    filter(Episode_etiology != "NPC") # NON NPC RESOLUTION
+  
+  # STEP2: Statistics
+  
+  expected.p <- c(1/3,1/3,1/3) # NULL distribution
+  print(c('Expected P: ', expected.p))
+  
+  
+  label_nudge_y = 0
+  # return(success.heat.dt)
+  if (plot_binom) {
+    binom <- success.heat.dt %>%
+      filter(Episode_etiology != 'NPC') %>% # NON NPC RESOLUTION
+      select(Episode_etiology,cluster_num_amplicon, Episode_is_cured, count) %>% 
+      dplyr::group_by(Episode_etiology, cluster_num_amplicon) %>%  #Episode_etiology, cluster_num_amplicon 
+      select(Episode_etiology, count, cluster_num_amplicon, Episode_is_cured) %>% 
+      summarise(
+        data = list(
+          pairwise_binom_test_against_p(
+            deframe(select(cur_data_all(), Episode_is_cured, count)), #cluster_num_amplicon,Episode_is_cured
+            alternative = "two.sided", #"greater",
+            p = expected.p,
+            p.adjust.method = "fdr"
+          )),
+        Episode_is_cured = list(Episode_is_cured),
+        cluster_num_amplicon = list(cluster_num_amplicon)
+      ) %>%  
+      unnest_wider(data) %>%  
+      unnest(c(group:p.adj.signif,Episode_is_cured,cluster_num_amplicon)) %>% 
+      mutate(p.adj.overall = p.adjust(p, method='fdr')) %>% 
+      add_significance(p.col = "p.adj", # Column wise or global?
+                       output.col = 'p.adj.overall.signif',
+                       cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                       symbols = c("***", "**", "*", ""))
+    # print(binom)
+    
+    # Combine
+    success.heat.dt <- success.heat.dt %>% left_join(binom)
+    
+    label_nudge_y = -.12
+  }
+  
+  print(success.heat.dt, n=Inf)
+  
+  # STEP3: PLOT!
+  p.success.heat<- success.heat.dt %>% 
+    ggplot(., aes(x = cluster_num_amplicon,
+                  y = Episode_is_cured,
+                  fill = freq)) +
+    geom_tile(color = "black", linewidth=.2, width=.9) + #.9
+    geom_text(aes(label=count, color = lblcolor), size=6/.pt, nudge_y = label_nudge_y) +
+    guides(fill = guide_colourbar(label = TRUE,
+                                  ticks = FALSE,
+                                  title = "Frequency",
+                                  frame.linewidth=.2,
+                                  frame.colour="black",
+                                  ticks.colour = "black",
+                                  title.position="top")) +
+    theme_nature()+
+    scale_fill_viridis() + 
+    labs(x="Microbiota state", 
+         y="Pneumonia etiology") + 
+    facet_wrap2(~Episode_etiology, nrow=3, axes='all',remove_labels = 'x') +
+    theme(aspect.ratio = .9,
+          # axis.text.x = element_blank(),
+          panel.background = element_blank(),
+          strip.background = element_blank(),
+          panel.spacing = unit(0, 'pt'),
+          # legend.title = element_text(angle = 90), 
+          # strip.text = element_text(size=6)
+    ) +
+    scale_color_manual(values=c(white="white", black="black")) +
+    guides(color='none')
+  # return(success.heat.dt)
+  if (plot_binom | plot_chisq){
+    p.success.heat <- p.success.heat + 
+      geom_text(aes(label=p.adj.overall.signif, color=lblcolor), size=6/.pt, nudge_y = -label_nudge_y)
+  }
+  # return(success.heat.dt)
+  return(p.success.heat)
+  
+}
+
+p.success.heat <- plot_heatmap_outcome(F, plot_binom  = T) 
+p.success.heat
+
+
+p.success.heat.baseline <-plot_heatmap_outcome(T, plot_binom = T)
+p.success.heat.baseline
+
+ggsave(filename = 'figures/pneumotypes/05A_EtiologyHeatAll.pdf', plot = p.success.heat, units='in', width = 1.53, height=1.82)
+ggsave(filename = 'figures/pneumotypes/05B_EtiologyHeatBaseline.pdf', plot = p.success.heat.baseline, units='in', width = 1.53, height=1.82)
+
+```
+
+
+# FEATURE SIGNATURES
+
+## Exploratory
+### Top phyla
+
+```{r}
+# write as generic function to use for genus
+plot_top_prevalent <- function(my_features, my_column, threshold=0.1){
+  
+  # get top prev taxa
+  top_phyla <- my_features %>% group_by(feature) %>%
+    summarize(prevalence = sum(value > 0)/n()) %>%
+    arrange(desc(prevalence)) %>%
+    filter(prevalence>threshold) %>%
+    pluck('feature')
+  
+  # subset and order
+  my_features <- my_features %>%
+    group_by(sample_name) %>%
+    mutate(value = value/sum(value),
+           value = asin(sqrt(value))) %>%
+    ungroup() %>%
+    filter(feature %in% top_phyla) %>%
+    mutate(feature = factor(feature, levels=top_phyla)) %>%
+    left_join(permmeta) %>%
+    dplyr::rename(my_column = my_column)
+  
+  # plot
+  ggp <- my_features %>%
+    drop_na(my_column) %>%
+    ggplot(aes(x=feature, y=value, fill=feature)) +
+    geom_boxplot() +
+    theme_nature() +
+    ggh4x::facet_wrap2(~ my_column, axes='all')#,scales ='free_y')
+  return(ggp)
+}
+
+
+features_phyla <- get_phylum_taxa() %>% tidy_features()
+
+# Phyla (Exploratory)
+plot_top_prevalent(features_phyla, 'cluster_num_amplicon', threshold = 0.2) +
+  theme(axis.text.x = element_text(size=3)) +
+  rotate_x_text(45)
+
+# Genera (Exploratory)
+plot_top_prevalent(mox_feature_list[['AMP [Genus]']] %>% tidy_features(), 'cluster_num_amplicon', threshold = .7) +
+  theme(axis.text.x = element_text(size=3)) +
+  rotate_x_text(45)
+
+```
+
+### Phyla Density
+
+```{r}
+plot_phla_distribution <- function(my_features, my_column, threshold=0.1){
+  
+  # subset and order
+  my_features <- my_features %>%
+    group_by(sample_name) %>%
+    mutate(value = value/sum(value),
+           value = asin(sqrt(value))) %>%
+    ungroup() 
+  
+  # get top prev taxa
+  top_phyla <- my_features %>% group_by(feature) %>%
+    summarize(prevalence = sum(value > 0)/n()) %>%
+    arrange(desc(prevalence)) %>%
+    filter(prevalence>threshold) %>%
+    pluck('feature')
+  
+  dput(top_phyla)
+  
+  my_features <- my_features %>%
+    filter(feature %in% top_phyla) %>%
+    mutate(feature = factor(feature, levels=top_phyla)) %>%
+    left_join(permmeta) %>%
+    dplyr::rename(my_column = my_column)
+  
+  # plot
+  ggp <- my_features %>%
+    drop_na(my_column) %>%
+    ggplot(aes(x=value, y=my_column, fill=my_column)) +
+    geom_density_ridges(linewidth=.3, scale = 1.5) +
+    theme_nature()+
+    labs(x="Abundance", y="Microbiota State") +
+    theme(aspect.ratio = 1, 
+          legend.position = "none",
+          axis.ticks.y = element_blank(),
+          # axis.ticks.x = element_blank()
+          axis.text.y = element_blank(),
+          panel.spacing = unit(6, "pt"),) +     
+    ggh4x::facet_wrap2(~ feature,ncol=1, axes='all', remove_labels = 'x') +
+    scale_fill_manual(values=mox_color_lists[['cluster_num_amplicon']]) 
+  # scale_colour_manual(values=darken(mox_color_lists[['Episode_is_cured']], 0.4)) 
+  
+  return(ggp)
+}
+
+# Older version (not ZLR)
+phyla_density <- plot_phla_distribution(my_features = features_phyla, my_column = 'cluster_num_amplicon', threshold = .1)
+# phyla_density
+```
+### Shannon Density
+```{r}
+
+permmeta <- permmeta %>% left_join(
+  vegan::diversity(t(mox_feature_list[['AMP [Genus]']] %>% column_to_rownames('feature')), index='invsimpson') %>% as_tibble(rownames = 'sample_name') %>% dplyr::rename(invsimpson_amp = 'value')
+)
+
+library(ggridges)
+
+# As Density Distrib
+shannon.density <- permmeta %>% 
+  mutate(valuescaled=scale(invsimpson_amp)) %>%
+  drop_na(invsimpson_amp) %>% 
+  ggplot(., aes(x=invsimpson_amp, 
+                y=cluster_num_amplicon, 
+                fill=cluster_num_amplicon)) + 
+  geom_density_ridges(linewidth=.2, scale = 1) +
+  theme_nature()+
+  labs(x="Shannon Index", y="Microbiota State") +
+  theme(aspect.ratio = 1, 
+        legend.position = "none",
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank()) +
+  scale_fill_manual(values=mox_color_lists[['cluster_num_amplicon']]) 
+shannon.density 
+```
+
+## ZLR Phyla + Genera
+```{r}
+# MOST PREVALENT PHYLA 
+features_phyla_tss <- features_phyla %>% 
+  wide_features() %>% 
+  normalize_feature_table(normalize = T, transform = "none") 
+
+# Top prevalent, should be same as plot printed just before this.
+phyla_of_interest <- c("Actinobacteriota", "Firmicutes", "Proteobacteria", "Bacteroidota", "Fusobacteriota", "Patescibacteria") # "Deinococcota", "Chloroflexi", "Campilobacterota", "Planctomycetota", "Verrucomicrobiota"),
+phyla_density <- graph_features(features_phyla_tss,
+                                feature_array = phyla_of_interest,
+                                groups_df = permmeta,
+                                feature_col_name = "feature", 
+                                group_col_name = 'cluster_num_amplicon', 
+                                baseline_group = '1',
+                                scale_val=5) +
+  xlab(bquote(''~log[2]~"(abund./median abund.)")) +guides(fill='none', color='none')
+
+
+# MOST ABUNDANT TAXA
+get_most_abundant_n(mox_feature_list[["AMP [Genus]"]], 15)
+taxa <- top_features
+print(length(taxa))
+
+# Undo log2p to make TSS for ZLRs
+undo_log2p <- function(feature_list){
+    feature_list <- feature_list %>% 
+        tidy_features() %>% 
+        mutate(value = ((2^value)-1)/100) %>% 
+        wide_features()
+}
+mox_feature_list <- lapply(mox_feature_list, undo_log2p)
+
+genera_density <- graph_features(mox_feature_list[["AMP [Genus]"]],
+               taxa, # "Deinococcota", "Chloroflexi", "Campilobacterota", "Planctomycetota", "Verrucomicrobiota"),
+               groups_df = permmeta,
+               feature_col_name = "feature", 
+               group_col_name = 'cluster_num_amplicon',
+               baseline_group = '1',
+               recode_dash = "-",
+               scale_val=5,) +
+  xlab(bquote(''~log[2]~"(abund./median abund.)")) +guides(fill='none', color='none')
+genera_density
+ggsave("figures/pneumotypes/top_30_mean_abundant_feauture.pdf", heigh=6.89, width=2.49)
+
+source('src/common/load_features.r')
+drop_samples()
+```
+
+# CLUSTER EVIDENCE
+## Unifrac Heat
+```{r}
+
+# Make Matrix of Weighted UniFrac Dissimilarity and Plot
+unif.pairwise<-
+  mox_dist_list[['AMP [Genus]']] %>% 
+  as.matrix() %>%
+  as_tibble(rownames = "Sample.A") %>%
+  pivot_longer(cols = 2:last_col(), names_to = "Sample.B", values_to = "UniFrac") %>%
+  left_join(mox_cluster_list[['Amplicon']], by = c("Sample.A"="sample_name" )) %>%
+  mutate(Cluster.A=case_match(as.numeric(cluster_num), # Change names (not used)
+                              1 ~ "1", 2 ~ "2", 3 ~ "3", 4 ~ "4", 5 ~ "5", .default = "D",
+                              .ptype = factor(levels = c("1", "2", "3", "4", "5", "D"))), 
+         .keep="unused") %>%
+  left_join(mox_cluster_list[['Amplicon']], by = c("Sample.B"="sample_name" )) %>%
+  mutate(Cluster.B=case_match(as.numeric(cluster_num), # Change names (not used)
+                              1 ~ "1", 2 ~ "2", 3 ~ "3", 4 ~ "4", 5 ~ "5", .default = "D",
+                              .ptype = factor(levels = c("1", "2", "3", "4", "5", "D"))), 
+         .keep="unused") %>%
+  select(c(Cluster.A, Cluster.B, UniFrac)) %>% 
+  filter(as.integer(Cluster.B) >= as.integer(Cluster.A)) %>% # Lower Triangle and Diagnol
+  dplyr::group_by(Cluster.A, Cluster.B) %>%
+  summarise(mean = mean(UniFrac)) 
+
+
+# Plot
+p.unif.pairwise <-
+  ggplot(unif.pairwise, aes(x = Cluster.A, 
+                            y = reorder(Cluster.B, desc(Cluster.B)), 
+                            fill= mean)) +
+  geom_tile(color = "black", linewidth=.2, width=1) + #.9
+  guides(fill = guide_colourbar(label = TRUE,
+                                ticks = FALSE,
+                                title = "Mean Weighted UniFrac",
+                                frame.linewidth=.2,
+                                frame.colour="black",
+                                ticks.colour = "black",
+                                title.position="top")) +
+  theme_nature() +
+  scale_fill_viridis() + 
+  labs(x="Pneumotype", y="Pneumotype") + 
+  theme(#axis.text.y = element_blank(), #element_text(hjust = 0),
+    #axis.ticks.y = element_blank(),
+    aspect.ratio = 1,
+    # legend.title = element_text(angle = 90)
+  ) +
+  rotate_x_text(45)
+
+
+p.unif.pairwise 
+min(unif.pairwise$mean)
+max(unif.pairwise$mean)
+```
+
+
+## Consensus Heat
+
+```{r}
+# Make plot of Consensus Score 
+
+# Read in + Clean
+report <- readRDS('objects/amp/AMP_19_ConsensusClusterReport.rds')
+ordered_cluster_names <- names(report[[4]]$consensusClass)
+mat.consensus <- report[[4]]$consensusMatrix
+row.names(mat.consensus) <- ordered_cluster_names
+colnames(mat.consensus) <- ordered_cluster_names
+consensus.pairwise <- mat.consensus %>%
+  as_tibble(rownames = "Sample.A") %>%
+  pivot_longer(cols = 2:last_col(), names_to = "Sample.B", values_to = "Consensus") %>%
+  mutate(Sample.A=str_split_i(Sample.A, '-', 1), Sample.A=str_split_i(Sample.A, 'PT', 2), # Make pretty sample names match
+         Sample.B=str_split_i(Sample.B, '-', 1), Sample.B=str_split_i(Sample.B, 'PT', 2)) %>%
+  left_join(mox_cluster_list[['Amplicon']], by = c("Sample.A"="sample_name" )) %>%
+  dplyr::rename(Cluster.A='cluster_num') %>%
+  left_join(mox_cluster_list[['Amplicon']], by = c("Sample.B"="sample_name" )) %>%
+  dplyr::rename(Cluster.B='cluster_num') %>%
+  select(c(Cluster.A, Cluster.B, Consensus)) %>%
+  filter(as.integer(Cluster.B) >= as.integer(Cluster.A)) %>% # Lower Triangle and Diagnol
+  dplyr::group_by(Cluster.A, Cluster.B) %>%
+  summarise(mean = mean(Consensus)) %>%
+  ungroup()
+
+# Plot!
+p.cons.pairwise <- 
+  ggplot(consensus.pairwise, aes(x = Cluster.A, 
+                                 y = reorder(Cluster.B, desc(Cluster.B)), 
+                                 fill=mean)) +
+  geom_tile(color = "black", linewidth=.2, width=1) + #.9
+  guides(fill = guide_colourbar(label = TRUE,
+                                ticks = FALSE,
+                                title = "Mean\nConsensus\nScore",
+                                
+                                frame.linewidth=.2,
+                                frame.colour="black",
+                                ticks.colour = "black",
+                                title.position="top")) +
+  theme_nature()+
+  scale_fill_viridis(option="E") + 
+  theme(aspect.ratio = 1, 
+        legend.position = "right",
+  ) +
+  labs(x="Pneumotype", y="Pneumotype") 
+p.cons.pairwise
+```
+# VIOLINS
+## Abundance & qPCR figures 
+```{r}
+
+# QPCR
+source('src/common/graph_violin.r')
+qPCR_overview <- permmeta %>% 
+  drop_na(Quantity.Mean.Log) %>% 
+  ggplot(., aes(x=cluster_num_amplicon, y=Quantity.Mean.Log, fill=cluster_num_amplicon)) %>%  #x=outcome
+  plot_violin()  %>% 
+  plot_statistics(.) +
+  scale_fill_manual(values=mox_color_lists[['cluster_num_amplicon']])  +
+  guides(fill = guide_legend(title = "Pneumotype")) +
+  ylab('Log 16S copies/µL') +
+  xlab('Pneumotype')#+ theme(aspect.ratio = 1.5)
+qPCR_overview
+
+# AMYLASE
+amylase <-  permmeta %>% 
+  add_clusters() %>% 
+  drop_na(cluster_num_amplicon, amylase_bf_log) %>%
+  ggplot(., aes(x=cluster_num_amplicon, y=amylase_bf_log, fill=cluster_num_amplicon))  %>% 
+  plot_violin(.) %>% plot_statistics(.) +
+  scale_fill_manual(values=mox_color_lists[['cluster_num_amplicon']])  +
+  guides(fill = guide_legend(title = "Pneumotype")) +
+  ylab('Log amylase') +
+  xlab('Pneumotype') #+ theme(aspect.ratio = 1.5)
+amylase
+# MDNP
+mdnp <-  permmeta %>% add_clusters() %>% 
+  drop_na(cluster_num_amplicon) %>%
+  ggplot(., aes(x=cluster_num_amplicon, y=dysbiosis_score, fill=cluster_num_amplicon)) %>%   #x=outcome
+  plot_violin(.) %>% plot_statistics(.) +
+  scale_fill_manual(values=mox_color_lists[['cluster_num_amplicon']])  +
+  guides(fill = guide_legend(title = "Pneumotype")) +
+  # guides(fill = guide_legend(title = "Pneumonia category")) +
+  ylab('MDNP score') +
+  xlab('Pneumotype')#+ theme(aspect.ratio = 1.5)
+mdnp
+# NEUTROPHILS
+# TODO replace with neutrophil from bodyfluid
+neutrophil <-  permmeta %>% 
+  drop_na(cluster_num_amplicon, neutrophils_bodyfluid) %>%
+  ggplot(., aes(x=cluster_num_amplicon, y=neutrophils_bodyfluid, fill=cluster_num_amplicon))  %>% 
+  plot_violin(.) %>% plot_statistics(.) +
+  scale_fill_manual(values=mox_color_lists[['cluster_num_amplicon']])  +
+  guides(fill = guide_legend(title = "Pneumotype")) +
+  ylab('Neutrophil level (%)') +
+  xlab('Pneumotype')# + theme(aspect.ratio = 1.5)
+
+get_alpha()
+# SHANNON
+shannon.violin <- permmeta %>%
+  drop_na(invsimpson_amp) %>%
+  ggplot(., aes(x=cluster_num_amplicon, y=invsimpson_amp, fill=cluster_num_amplicon)) %>% 
+  plot_violin(.) %>% 
+  plot_statistics(.) +
+  scale_fill_manual(values=mox_color_lists[['cluster_num_amplicon']])  +
+  guides(fill = guide_legend(title = "Pneumotype")) +
+  ylab('Inv. Simpson') +
+  xlab('Pneumotype') #+ theme(aspect.ratio = 1.5)
+shannon.violin
+
+```
+# BUBBLES
+## Pn. + Overview Bubble
+```{r}
+source('src/common/graph_bubble_plot.r')
+my_bubble <- bubble_plot(mox_dist_list[["AMP [Genus]"]], mox_feature_list[["AMP [Genus]"]], plot_all = T, category_level_plot = 'cluster_num_amplicon') +
+  xlab('Pneumotype') +
+  ylab(NULL) +
+  theme(axis.text.y = element_text(face = 'italic'),
+        axis.text.x = element_blank(),
+        axis.ticks.x=element_blank()) +
+  scale_fill_manual(values=mox_color_lists[['cluster_num_amplicon']])
+my_bubble
+ggsave('figures/pneumotypes/bubble_plot_abundance_mean.pdf', my_bubble, units="in", height=3.32, width=2.75)
+
+# Big Bubbles
+library(ghibli)
+big_bubble <- bubble_plot(mox_dist_list[["AMP [Genus]"]], mox_feature_list[["AMP [Genus]"]], plot_all = T,filter_top_n = 100, category_level_plot = NULL) +scale_fill_manual(values=mox_color_lists[['cluster_num_amplicon']])
+big_bubble <- big_bubble + facet_grid2(~cluster_num_amplicon,space = 'free_x',scales='free_x',shrink = T)
+big_bubble
+ggsave('figures/pneumotypes/bubble_plot_abundance_facet.pdf', big_bubble, units="in", height=16.57, width=2.49)
+
+```
+
+# NETWORK
+## Outcome Network
+```{r}
+cluster_timeline <- permmeta %>% 
+  select(sample_name,script_id,cluster_num_amplicon) %>% 
+  drop_na(cluster_num_amplicon) %>% 
+  mutate(baseline = case_when(str_ends(sample_name, 'BAL00')~'Baseline',.default='BAL')) %>% 
+  arrange(sample_name) %>% 
+  group_by(script_id) %>% 
+  mutate(order_bal = row_number(sample_name),
+         total_bal = n(),
+         is_last_bal = case_when(total_bal==order_bal ~ TRUE, .default=FALSE)) %>% 
+  mutate(next_bal = lead(cluster_num_amplicon),
+         next_bal = case_when(is.na(next_bal) & is_last_bal==T~ 'outcome', .default=next_bal)) %>%  # replace na wth outcome node
+  ungroup()
+
+
+cluster_ntwk <- cluster_timeline %>% 
+  group_by(cluster_num_amplicon,next_bal) %>% 
+  summarise(n_transition=n()) %>% 
+  mutate(sum_cluster=sum(n_transition),
+         freq_transiton = round(n_transition/sum(n_transition), 2)) %>% 
+  ungroup()
+
+library(igraph)
+
+links <- cluster_ntwk %>% mutate(next_balcolor = next_bal) %>% arrange(desc(next_bal))
+nodes <- cluster_ntwk %>% 
+  select(cluster_num_amplicon,sum_cluster) %>% 
+  unique() %>% 
+  add_row(cluster_num_amplicon='outcome', sum_cluster=100) %>% 
+  rename(cluster='cluster_num_amplicon') 
+
+colrs <- c('1' = "#F0D77BFF",
+           '2' = "#B4DAE5FF",
+           '3' = "#AE93BEFF",
+           '4' = "#5C5992FF",
+           'outcome' = "#999999")
+colrs <- c(mox_color_lists[['cluster_num_amplicon']], 'outcome' = "#999999")
+# Instantiate graph
+net <- graph_from_data_frame(d=links, vertices=nodes, directed=T) 
+
+# Basic igraph visual
+l=layout_as_star(net)
+plot(net, layout=l,edge.arrow.size=.4,
+     vertex.color=colrs,
+     vertex.label.color='black',
+     vertex.label.cex=.5,
+)
+# Set edge color
+V(net)$size <- scales::rescale(V(net)$sum_cluster, to = c(50, 90))
+
+E(net)$color <- E(net)$next_balcolor
+
+require(tidygraph)
+library(ggraph)
+library(ghibli)
+
+# Plot ggraph 
+pneumotype_network <- ggraph(net,  layout = "stress") +
+  geom_edge_fan(aes(label = freq_transiton, color=color), 
+                angle_calc = "along",
+                # vjust = -.5,
+                label_dodge = unit(-1.5, 'mm'),
+                label_size = 5/.pt,
+                end_cap = circle(.5),
+                start_cap = circle(.5),
+                arrow = arrow(length = unit(1, 'mm'), type = 'closed'),
+                strength=.6
+  ) +  scale_edge_colour_manual(values=colrs)+
+  geom_edge_loop(aes(label =  as.character(freq_transiton),color=color,strength=.3), 
+                 angle_calc = "along", 
+                 label_dodge = unit(-1.5, 'mm'),
+                 label_size = 5/.pt,
+                 end_cap = circle(.5),
+                 start_cap = circle(.5),
+                 arrow = arrow(length = unit(1, 'mm'), type = 'closed'),
+                 check_overlap=T,
+  )+
+  geom_node_point(aes(fill=name, size=sum_cluster),shape = 21)+
+  geom_node_text(aes(label = name), size = 5/.pt) +
+  scale_fill_manual(values=colrs) +  
+  scale_edge_colour_manual(values=colrs)+
+  scale_size_continuous(range = c(4, 8)) +
+  
+  theme_nature()+
+  theme(aspect.ratio = 1,
+        axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks=element_blank(),
+        # axis.ticks=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        legend.position = 'right') +
+  labs(x=NULL,y=NULL)
+pneumotype_network
+ggsave(filename = 'figures/pneumotypes/figure5_pneumotype_network.pdf',pneumotype_network, units='in', width=3.42, height=2.85)
+
+```
+## Only Pneumotype Network
+```{r}  
+# Simplify
+cluster_ntwk <- cluster_ntwk %>% rename(from='cluster_num_amplicon', to='next_bal')
+
+# Get node level information
+node_level_dt <- cluster_ntwk %>%  select(from, sum_cluster) %>% unique()
+
+# Instantiate tidygraph and add node attributes
+new_graph <- as_tbl_graph(cluster_ntwk) %>% 
+  activate(nodes) %>%
+  left_join(node_level_dt, by = c("name" = "from")) %>% 
+  mutate(sum_cluster = case_when(is.na(sum_cluster)~100, .default=sum_cluster)) %>% # Create pseudovalue for outcome
+  filter(name!='outcome') %>% 
+  activate(edges) %>%
+  mutate(freq_transiton_n=paste0(' ', freq_transiton, ' (n = ', n_transition, ')')) %>%
+  
+  activate(nodes)
+
+
+
+only_pneumotypes_network <- ggraph(new_graph,  layout = "star") +
+  geom_edge_parallel2(aes(label = freq_transiton_n, color=as.factor(from),edge_width=freq_transiton), 
+                      angle_calc = "along",
+                      # vjust = -.5,
+                      label_dodge = unit(-.5, 'mm'),
+                      label_colour = NA, # makes same color as edge
+                      label_size = 2/.pt,
+                      end_cap = circle(.2),
+                      sep = unit(.5, "mm"),
+                      start_cap = circle(.2),
+                      arrow = arrow(length = unit(.5, 'mm'), type = 'closed')
+  ) +  
+  # scale_edge_colour_manual(values=colrs) +
+  geom_edge_loop(aes(label =  as.character(freq_transiton_n),
+                     color=as.factor(to),
+                     strength=.45,span=90, 
+                     direction=(ifelse(to==1,x+2.5,x-1))*sign(y+.000001)*sign(x+.000001)*70,# angles to outside
+                     edge_width=freq_transiton), 
+                 angle_calc = "along", 
+                 label_dodge = unit(-.4, 'mm'),
+                 label_colour = NA, # makes same color as edge
+                 label_size = 2/.pt,
+                 end_cap = circle(.1),
+                 start_cap = circle(.1),
+                 arrow = arrow(length = unit(.5, 'mm'), type = 'closed')
+  )+
+  geom_node_point(aes(fill=name, size=sum_cluster),shape = 21, stroke=.2) +
+  geom_node_text(aes(label = name), size = 2/.pt) +
+  scale_fill_manual(values=colrs) +  
+  scale_edge_colour_manual(values=colrs)+
+  scale_edge_width(range=c(.1,.75)) +
+  scale_size_continuous(range = c(1, 2.5)) +
+  theme_nature() +
+  theme(
+    # aspect.ratio = 1,
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    axis.ticks=element_blank(),
+    # axis.ticks=element_blank(),
+    axis.text.x=element_blank(),
+    axis.text.y=element_blank(),
+    legend.position = 'right',
+    legend.margin = margin(1,1,1,1)
+  ) +
+  labs(x=NULL,y=NULL) +
+  guides(edge_color='none', fill='none', edge_width='none', size=guide_legend(title='n (state)')) 
+only_pneumotypes_network
+ggsave(filename = 'figures/pneumotypes/figure5_only_pneumotype_network.pdf',only_pneumotypes_network, units='in', width=1.42, height=1.05)
+
+```
+
+# MERGING FIGURES
+## Long
+```{r}
+cluster_pcoa <- readRDS('objects/cluster_pcoa.rds') + 
+  theme(legend.position = 'right'
+        # legend.margin      = margin(1, 1, 1, 1)
+  ) + 
+  labs(fill='State', shape='Outcome')+guides(shape = "none")
+
+
+library(patchwork)
+
+{
+  #Better
+  design <- '
+AAB
+AAC
+DDE
+DDF
+DDF
+'
+  
+  ## shannon.violin <-shannon.violin+plot_layout(guides = 'collect')
+  figure3<- 
+    cluster_pcoa + p.cons.pairwise+ shannon.violin + phyla_density+ p.HeatDistribution + p.success.heat + plot_layout(
+      design = design,
+      guides='collect',
+      # heights = c(1, 1,1),
+      # widths = c(1, 1,1)
+    )  & theme(legend.margin = margin(2,2,2,2))
+}
+figure3
+# ggsave('figures/pneumotypes/figure4_clusters.pdf', figure3, width=6.88, height=4.91, units='in')
+# ggsave('figures/pneumotypes/figure4_clusters.pdf', figure3, width= 3.55, height= 4.65, units='in') # 3.58 x 4.76
+ggsave('figures/pneumotypes/figure4_clusters.pdf', figure3, width= 3.85, height= 5.30, units='in') # 3.58 x 4.76
+
+```
+
+
+## Main Plot
+```{r}
+design <- '
+AABDE
+AACDE
+FGJKE
+HILKE
+'
+
+## shannon.violin <-shannon.violin+plot_layout(guides = 'collect')
+fig.pneumotypes_all <- cluster_pcoa + #A
+  p.cons.pairwise +
+  shannon.violin +
+  phyla_density+ 
+  genera_density +
+  qPCR_overview + amylase + mdnp+ neutrophil +
+  p.HeatDistribution +
+  p.success.heat +
+  only_pneumotypes_network+
+  
+  plot_layout(
+    design = design, 
+    guides = "collect",
+    # axis_titles = 'collect',
+    widths = c(1, 1,1,1.5,1.5),
+    heights=c(1,1,1,1)
+  )  + plot_annotation(tag_levels = 'a')#& theme(legend.direction = "vertical", legend.box = "horizontal")
+fig.pneumotypes_all
+ggsave('figures/pneumotypes/figure4_all_pneumotype_data.pdf', fig.pneumotypes_all, units='in', width=6.88, heigh=4.68)
+```

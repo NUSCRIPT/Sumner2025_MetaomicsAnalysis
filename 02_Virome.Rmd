@@ -1,0 +1,315 @@
+---
+title: "Virome"
+output: html_document
+date: "2024-01-05"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+
+library(tidyverse)
+library(viridis)
+library(ggpubr)
+source("src/common/feature_tables_functions.r")
+source("src/common/ordination_functions.r")
+source("src/common/nature_theme.r")
+source("config.r")
+
+################################
+##  Read In Abundance Table  ##
+################################
+
+print(FILE_mgx_virome_table)
+print(FILE_mgx_virome_taxa)
+
+# Feature table with phage abundances
+features_viral <- read_tsv(FILE_mgx_virome_table)
+names(features_viral) <- gsub(names(features_viral), pattern = "PT_", replacement = "") 
+
+# Phage Taxa File
+taxa_viral <- read_tsv(FILE_mgx_virome_taxa) %>% 
+    mutate(feature = factor(feature, levels = features_viral$feature)) %>% 
+    arrange(feature) %>% 
+    replace_na(list(
+        realm = "UnassignedRealm",
+        kingdom = "UnassignedKingdom",
+        phylum = "UnassignedPhylum",
+        class = "UnassignedClass",
+        order = "UnassignedOrder",
+        family = "UnassignedFamily"
+        )) %>% 
+    mutate(vOTU = paste0("vOTU",row_number(feature), "-", class, " ", family))
+setdiff(features_viral$feature,taxa_viral$feature)
+
+# contig name to vOTUs mapping file 
+feature2votu <- taxa_viral %>% select(feature, vOTU)
+write_tsv(feature2votu, "tables/contig_name2votu_name.tsv")
+
+# Rename features to be vOTUs
+features_viral <- features_viral %>% left_join(feature2votu) %>% mutate(feature=vOTU) %>% select(!vOTU)
+taxa_viral <- taxa_viral %>% mutate(feature=vOTU) %>% select(!vOTU)
+
+
+################################
+### Abundance Table - Family ###
+################################
+
+
+# Get abundances at phage-family level
+features_viral_fam<- features_viral %>% 
+    drop_zero_sum_samples() %>% 
+    tidy_features() %>% 
+    left_join(taxa_viral) %>% 
+    unite("full_taxa", realm:order) %>% 
+    # replace_na(list(family = "UnassignedFamily")) %>% 
+    group_by(sample_name,family) %>% 
+    summarize(value = sum(value)) %>% 
+    mutate(feature = family) %>% 
+    select(feature, sample_name, value) %>% 
+    wide_features() %>% 
+    normalize_feature_table(normalize = T, transform = "none") %>% 
+    get_most_prevalent(.01) %>% 
+
+    drop_zero_sum_features() %>% 
+    drop_zero_sum_samples()
+
+md <- get_sample_types(features_viral_fam)
+
+# Ordinate Phage-Family level abundance table to get PCoA
+fam_ord <- features_viral_fam %>% 
+    get_bal_samples() %>% 
+    get_distance(method = "bray") %>% 
+    my_ordination_helper(., features_viral_fam %>% tidy_features() %>%  pivot_wider(names_from = feature,values_from =  value))
+fam_ord %>% 
+    visualize_ordination(shape_value = "sample_type", fill_value = "Anelloviridae")
+
+
+################################
+#### Abundance Table - vOTU ####
+################################
+
+# Get Abundance Table at vOTU level
+features_viral_clean<- features_viral %>% 
+    drop_zero_sum_samples() %>% 
+    normalize_feature_table(normalize = T,transform = "none") %>% 
+    get_most_prevalent(.01) %>% 
+    drop_zero_sum_samples() %>% 
+    drop_zero_sum_features()
+
+md <- get_sample_types(features_viral_clean)
+
+vir_ord <- features_viral_clean %>% 
+    get_bal_samples() %>% 
+  normalize_feature_table(normalize = F, transform = "ast_no_tss") %>%
+    get_distance(method = "jaccard") %>% 
+    my_ordination_helper(., md)
+vir_ord %>% 
+    visualize_ordination(shape_value = "sample_type", fill_value = "sample_type")
+
+
+################################
+##   Save Table & Distance   ##
+################################
+
+features_viral_clean_log <- features_viral_clean %>% normalize_feature_table(normalize = F, transform = "log100")
+
+features_viral_clean_jaccard_ast <- features_viral_clean %>% 
+  get_bal_samples() %>% 
+  normalize_feature_table(normalize = F, transform = "ast_no_tss") %>% 
+  get_distance(method = "jaccard") 
+
+
+saveRDS(features_viral_clean_log, file="objects/mgx/mgx_07_table_vOTUsLog.rds")
+saveRDS(features_viral_clean_jaccard_ast, file="objects/mgx/mgx_08_distance_vOTUsASTJaccard.rds")
+
+################################
+#### Top Features in Tables ####
+################################
+
+
+# Visualize heatmap of all vOTUs
+pheatmap::pheatmap(features_viral_clean %>% get_most_abundant_n(50) %>% column_to_rownames("feature"),
+                   color= c("black",viridis(100)),
+                   fontsize = 3,filename = "figures/virome/top_abundant_votus.pdf")
+
+# Box Plot of Family-Level
+features_viral_fam %>% 
+    get_bal_samples() %>% 
+    tidy_features() %>% 
+    ggplot(aes(x=feature, y=value))+
+    geom_boxplot(outliers = FALSE) +
+    theme_nature() +
+    geom_jitter(width = .25) +
+    rotate_x_text(45) +
+    ylab("Relative Abundance")
+
+ggsave("./figures/virome/viral_families_boxplot.pdf", units="in", height=1.78, width =  4.15)
+
+# Box Plot of vOTU-Level
+features_viral_clean %>% 
+    get_bal_samples() %>% 
+    get_most_abundant_n(20) %>% 
+    tidy_features() %>% 
+    ggplot(aes(x=feature, y=value))+
+    geom_boxplot(outliers = FALSE) +
+    geom_line(aes(group=sample_name), alpha=.3)+
+    theme_nature() +
+    geom_jitter(width = .25) +
+    rotate_x_text(90) +
+    ylab("Relative Abundance")
+ggsave("./figures/virome/viral_top_votus_boxplot.pdf", units="in", height=5.64, width =  3.23)
+
+
+################################
+# Stacked Bar Plots for Tables #
+################################
+
+# Colors for Stacked Bar Plot
+c25 <- c(
+    "dodgerblue2", "#E31A1C", # red
+    "green4",
+    "#6A3D9A", # purple
+    "#FF7F00", # orange
+    "black", "gold1",
+    "skyblue2", "#FB9A99", # lt pink
+    "palegreen2",
+    "#CAB2D6", # lt purple
+    "#FDBF6F", # lt orange
+    "gray70", "khaki2",
+    "maroon", "orchid1", "deeppink1", "blue1", "steelblue4",
+    "darkturquoise", "green1", "yellow4", "yellow3",
+    "darkorange4", "brown", "grey38"
+)
+
+
+
+# Order by PC1 from Family Ordination
+bar_order <- fam_ord$ord_obj %>% arrange(pcoa1, pcoa2) %>% pluck("sample_name")
+
+# Family Level All Features Stacked Bar 
+features_viral_fam %>% 
+    get_bal_samples() %>% 
+    tidy_features() %>% 
+    mutate(sample_name = factor(sample_name, levels=bar_order)) %>% 
+    arrange(sample_name) %>% 
+    ggplot(., aes(fill=feature, y=value, x=sample_name)) + 
+    geom_bar(position="fill", stat="identity", color="black", linewidth=.2) +
+    theme_pubclean() +
+    theme(legend.position = "right",
+          axis.text.x = element_text(size=3)) +
+    rotate_x_text(90) +
+    scale_fill_manual(values=c25) +
+    ylab("Relative Abundance")
+
+ggsave("./figures/virome/stacked_bar_viral_families.pdf", units="in", height=4.05, width =  9.70)
+
+    
+# Family Level of Clean vOTUs
+features_viral_clean %>% 
+    get_bal_samples() %>% 
+    drop_zero_sum_samples() %>% 
+    tidy_features() %>% 
+    left_join(taxa_viral) %>% 
+    unite("full_taxa", realm:order) %>% 
+    replace_na(list(family = "UnassignedFamily")) %>% 
+    mutate(sample_name = factor(sample_name, levels=bar_order)) %>% 
+    arrange(sample_name) %>% 
+    ggplot(., aes(fill=family, y=value, x=sample_name)) + 
+    geom_bar(position="fill", stat="identity", color="black", linewidth=.2) +
+    theme_pubclean() +
+    theme(legend.position = "right",
+          axis.text.x = element_text(size=3)) +
+    rotate_x_text(90) +
+    scale_fill_manual(values=c25) +
+    ylab("Relative Abundance")
+
+ggsave("./figures/virome/stacked_bar_clean_votu_at_viral_families.pdf", units="in", height=4.05, width =  9.70)
+
+
+# Class Level of Clean vOTUs
+features_viral_clean %>% 
+    get_bal_samples() %>% 
+    drop_zero_sum_samples() %>% 
+    tidy_features() %>% 
+    left_join(taxa_viral) %>% 
+    replace_na(list(family = "UnassignedFamily",class = "UnassignedClass")) %>% 
+    mutate(sample_name = factor(sample_name, levels=bar_order)) %>% 
+    arrange(sample_name) %>% 
+    ggplot(., aes(fill=class, y=value, x=sample_name)) + 
+    geom_bar(position="fill", stat="identity", color="black", linewidth=.2) +
+    theme_pubclean() +
+    theme(legend.position = "right",
+          axis.text.x = element_text(size=3)) +
+    rotate_x_text(45) +
+    scale_fill_manual(values=c25) +
+    ylab("Relative Abundance")
+
+ggsave("./figures/virome/stacked_bar_clean_votu_at_viral_class.pdf", units="in", height=4.05, width =  9.70)
+
+
+features_viral_clean %>% get_bal_samples() %>% get_most_abundant_n(20)
+bar_order <- vir_ord$ord_obj %>% arrange(pcoa1, pcoa2) %>% pluck("sample_name")
+
+# Top 20 Features in vOTU-level data
+features_viral_clean %>% 
+    get_bal_samples() %>% 
+    drop_zero_sum_samples() %>% 
+    tidy_features() %>% 
+    # left_join(taxa_viral) %>% 
+    mutate(sample_name = factor(sample_name, levels=bar_order)) %>% 
+    arrange(sample_name) %>%
+    mutate(feature = case_when(feature %in% top_features ~ feature, .default = "Other")) %>% 
+    mutate(feature = factor(feature, levels=c("Other", top_features))) %>% 
+    arrange(feature) %>% 
+    ggplot(., aes(fill=feature, y=value, x=sample_name)) + 
+    geom_bar(position="fill", stat="identity", color="black", linewidth=.2) +
+    theme_pubclean(5) +
+    theme(legend.position = "right",
+          legend.key.size = unit(.1, "in"),
+          axis.text.x = element_text(size=3)) +
+    rotate_x_text(90) +
+    scale_fill_manual(values=c("grey30", c25)) +
+    ylab("Relative Abundance")
+
+ggsave("./figures/virome/stacked_bar_top_20_votus.pdf", units="in", height=4.05, width =  9.70)
+
+
+
+################################
+### Sankey Plot of vOTUs Taxa ##
+################################
+
+library(ggsankey)
+
+df <- mtcars %>%
+    make_long(cyl, vs, am, gear, carb)
+taxa_viral %>% 
+    mutate(all_vOTUs = "all vOTUs", .after = feature) %>%
+    make_long(all_vOTUs:family) %>% 
+    ggplot(., aes(x = x, 
+                   next_x = next_x, 
+                   node = node, 
+                   next_node = next_node,
+                   fill = factor(x),
+                    label = node)) +
+    geom_sankey(flow.alpha = 0.5, node.color = 1,
+                linewidth=.1,width = .25,space = 8,type = "alluvial",
+                color="black") +
+    geom_sankey_label(size = 1, color = 1,
+                      type = "alluvial",width = 1, space = 8,
+                      position = "nudge",
+                      alpha=.8) +
+    
+    scale_fill_viridis_d(option = "A", alpha = 0.95) +
+    theme_sankey(base_size = 5) +
+    theme(legend.key.size = unit(.01, "in"))
+
+ggsave("./figures/virome/votu_sankey.pdf", units="in", height=3.90, width =  4.30)
+
+```

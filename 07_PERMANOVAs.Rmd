@@ -1,0 +1,244 @@
+---
+title: "PERMANOVA Analysis"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+source("src/common/get_distances.r")
+source('src/common/load_metadata.r')
+source('src/common/get_clusters.r')
+library(tidyverse)
+library(janitor)
+library(ggridges)
+library(vegan)
+library(usedist)
+source("src/common/nature_theme.r")
+drop_samples()
+```
+# List of Metadata to visualize for permanova
+```{r}
+permmeta <- permmeta %>% mutate(Fever = case_when(Temperature >= 100 ~ "Fever", Temperature < 100 ~ "No Fever"))
+
+permanova_metadata <- list( 
+  'Individuals' = "script_id", # Individual id
+  'Pneumonia Type' = "Episode_category",  # Diagnosis 
+  'Pneumonia Etiology' = "Episode_etiology",
+  'Pneumonia Resolution' = "Episode_is_cured", 
+  'Binned Outcome' = "Binary_outcome",
+  'Baseline/Follow Up BAL' = "initial_bal_sample", # BAL methodology
+
+  'Discharge Disposition' = 'Discharge_disposition', # Clinical hallmarks, disease severity
+  'Amylase Level (Log10, U/L)' = "amylase_bf_log",
+  'FiO2' = 'FiO2',
+  'PEEP' = 'PEEP',
+  'Plateau Pressure' = 'Plateau_Pressure',
+  'Lung Compliance' = 'Lung_Compliance',
+  'PaO2/FIO2' = 'PaO2FIO2_ratio',
+
+  'Antibiotic Use' = "antibiotics_flag",
+  'Hospital Length of Stay' = 'hospital_los_days',
+  'Days Since Admission' = 'BAL_day_after_hos_admission',
+  'Smoking Status' = 'Smoking_status',
+  'Race' = 'Race',
+  'Age' = 'Age',
+
+  'Respiratory Culture Results' = "bacteria_positive", # CB
+  "Fungal Culture Results" = 'fungal_positive',
+  'Neutrophil Level (%)' = "neutrophils_bodyfluid",
+  'Hemoglobin' = 'Hemoglobin',
+  'Platelets' = 'Platelets',
+  'Lymphoid Cell Level (%)' = 'Lymphocytes',
+  'White Blood Cell Level (%)'= "WBC_count", # redundant
+
+  '16S rRNA Gene Copies (Log10 µL)' = "Quantity.Mean.Log", # independent biomarkers
+  'MDNP Score' = 'dysbiosis_score',
+  'Pneumotype' = 'cluster_num_amplicon',
+  'Temperature' = 'Temperature',
+  'Fever' = 'Fever'
+
+  ) 
+```
+
+
+# Helper functions
+
+```{r}
+# Run permanova on distance matrix
+# rm NAs and order dist_matrix to match meta
+# <a_dist> = class dist, representing a distance matrix for each datatype
+# <a_meta> = class tibble/df, is md w/ 'sample_name' matching a_dist labels 
+run_permanova <- function(a_dist, a_meta) { 
+  # Instantiate vectors/count
+  adonis_out <- c()
+  adonis_out_df <- c()
+  out_cnt <- 1
+  
+  # Iterate through desired metadata 
+  for (i in permanova_metadata) {
+    print(paste("Analyzing:",i))
+    
+    # Get pretty name from list
+    pretty_i <- names(which(i == permanova_metadata)) 
+    
+    # Drop samples with missing metadata
+    a_meta_subset <- a_meta %>% tidyr::drop_na(i)
+
+    # Make sure more than one metadata component to prevent errors
+    if ( length(unique(a_meta_subset[[i]])) > 1 ) {
+      
+      # Prevent errors, subset to samples with relevant metadata (no NA) and reorder
+      common_labels <- intersect(labels(a_dist), a_meta_subset$sample_name)
+      a_meta_subset <- dplyr::filter(a_meta_subset, sample_name %in% common_labels)
+      a_dist_subset <- dist_subset(a_dist, a_meta_subset$sample_name)
+
+      print(dim(a_meta_subset))
+      
+      # Execute
+      form <- as.formula(paste("a_dist_subset", i, sep="~"))
+      permanova <- vegan::adonis2(form, data = a_meta_subset, permutations = 4999, parallel = 10)
+      print(permanova)
+
+
+
+      # Save relevant components of each PERMANOVA
+      adonis_out[[out_cnt]] <- permanova
+      adonis_out_df[[out_cnt]] <- slice_head(as_tibble(permanova)) %>% mutate(var = pretty_i)
+
+    }
+    
+    out_cnt <- out_cnt + 1
+
+  }
+  
+  return(adonis_out_df)
+}
+
+#tmp <- run_permanova(amp, permmeta)
+
+# Run list of distances to make final df for heat
+run_permanova_list <- function(dist_list, a_meta) {
+  # Instantiate seed for reproducibility and vectors/counts
+  set.seed(100)
+  results_df <- c()
+  cnt <- 1
+  
+  # Iterate through distance metric list/omic in get_distances
+  for (seq_i in seq_along(dist_list)) {
+      print(paste("OMIC", names(dist_list)[seq_i]))
+      # Execute permanova loop function
+      permanova_results_df <- run_permanova(dist_list[[seq_i]], a_meta)
+      
+      # Collapse each permanova result into 1df/omic, apply multiplicity correction
+      a_permanova <- do.call("rbind", permanova_results_df) %>%
+        dplyr::rename(P = "Pr(>F)") %>%
+        mutate(FDR = p.adjust(P, method = "fdr"), 
+               omic = names(dist_list)[seq_i],
+               var_df = paste0(var, " [", Df, "]"))
+      
+      # Save omic-PERMANOVA results in vector
+      results_df[[seq_i]] <- a_permanova
+      
+  }
+  
+  return(results_df)
+}
+
+```
+
+# Execute PERMANOVA
+```{r}
+distance_of_interest <- c("AMP [Genus]", "AMP [ASV]", "DNA [Taxonomy]", "DNA [Viral]", 
+                          "RNA [Taxonomy BKN]", "DNA [PFAM]", "RNA [PFAM]", 
+                          "RNA [Host Transcriptomics]", "CFU [Culture]")
+mox_dist_list <- mox_dist_list[distance_of_interest]
+
+permmeta <-permmeta %>% mutate(#return_vol=as.double(return_vol),
+                               script_id = factor(script_id))
+
+
+
+# Run PERMANOVA 
+# mox_perms <- run_permanova_list(mox_dist_list[!names(mox_dist_list) %in% c("DNA [Viral]","RNA [Taxonomy]", "RNA [Taxonomy, mpa]")], permmeta)
+mox_perms <- run_permanova_list(mox_dist_list, permmeta)
+
+# Collapse each omic into single df & make labels for plotting
+mox_perm_df <- do.call("rbind", mox_perms) %>%
+    mutate(percent_variance = paste0(as.character(round(R2*100, 1)), "%"),
+           FDR_annotation = case_when(FDR < 0.001 ~ "***",
+                                    FDR < 0.01 ~  "**",
+                                    FDR < 0.05 ~ "*",
+                                    TRUE ~  "")) %>%
+  group_by(var) %>%
+  mutate(var_annotation = case_when(min(Df) == max(Df) ~ paste0(var, " [", as.character(min(Df)),"]"),
+                                    min(Df) != max(Df) ~ paste0(var, 
+                                                                " [", as.character(min(Df)), "-", as.character(max(Df)),
+                                                                "]"))) %>%
+  ungroup() %>%
+  arrange(var)
+
+# Order by variance
+mox_perm_df_order <- mox_perm_df %>% 
+  group_by(var_annotation) %>% 
+  mutate(avg_per_var = mean(R2)) %>% 
+  ungroup() %>% 
+  # separate(var_annotation, into = c('category', NA), remove = F) %>%  # from when we had the subtypes like IB: 
+  # group_by(category) %>% 
+  mutate(avg_per_cat = mean(R2)) %>% 
+  # ungroup() %>% 
+  arrange(desc(avg_per_cat), desc(avg_per_var)) %>% 
+  distinct(var_annotation) %>% pluck('var_annotation')
+
+mox_perm_df <- mox_perm_df %>% 
+  mutate(omic = factor(omic, levels=names(mox_dist_list))) %>% 
+  mutate(var_annotation = factor(var_annotation, levels=mox_perm_df_order)) %>% 
+  arrange(omic, var_annotation)
+
+# Make text white for dark backgrounds
+alpha <- 1.9
+beta <- 0.1
+colorvalues <- pbeta(seq(0, 1, length=101), alpha, beta)
+mox_perm_df$lblcolor <- ifelse(qbeta(mox_perm_df$R2, alpha, beta) < 0.7, "black", "white")
+
+write_tsv(mox_perm_df, "tables/permanova_tests.tsv")
+# Plot Permanova as Heat Map
+# Note: geom_text increases text size in a way unaffected by theme arguments
+# add /.pt to counter the conversion in the geom_text argument
+permanova_heat <- ggplot(mox_perm_df, aes(x=omic, y=factor(var_annotation), fill = R2)) +
+  geom_tile(color = "black", width=1) + #.9
+  geom_text(aes(label=FDR_annotation, color = lblcolor), size=7/.pt, nudge_y = .12) + 
+  geom_text(aes(label=percent_variance, color = lblcolor), size=6/.pt, nudge_y = -.12) +
+  guides(fill = guide_colourbar(label = TRUE,
+                                ticks = TRUE,
+                                title = "",
+                                frame.linewidth=.4,
+                                frame.colour="black",
+                                ticks.colour = "black")) +
+  # theme(#axis.text.y = element_blank(), #element_text(hjust = 0),
+  #       #axis.ticks.y = element_blank(),
+  #       legend.position = "left",
+  #       panel.border = element_rect(colour = "black", fill=NA, linewidth=.75))  + 
+  scale_x_discrete(expand=c(0,0)) + 
+  scale_y_discrete(position="right",expand=c(0,0)) + 
+  scale_fill_gradientn(colours=colorRampPalette(brewer.pal(n = 9, name = "Blues"))(100),
+                       values=colorvalues,
+                       na.value="white", 
+                       limits=c(0, 1), 
+                       name="Variance Explained") +        
+  scale_color_manual(values=c(white="white", black="black")) +  
+  theme_nature() + 
+  theme(axis.text.x=element_text(angle=335,hjust=0),
+        panel.border = element_rect(colour = "black", fill=NA, linewidth=.5),
+        axis.line.y.right = element_blank(), 
+        axis.line.x.bottom = element_blank()
+        ) +
+  guides(color='none') +
+  labs(x="", y="",fill="Variance Explained")
+
+permanova_heat
+
+
+ggsave("figures/permanovas.pdf", permanova_heat, width = 4.97, height = 4.07, units = "in")
+saveRDS(permanova_heat,'objects/figure_objects/permanova_heat.rds')
+```

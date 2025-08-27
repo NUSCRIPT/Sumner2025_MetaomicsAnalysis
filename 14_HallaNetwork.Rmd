@@ -1,0 +1,529 @@
+---
+title: "Halla downstream"
+output: html_document
+date: "2023-11-20"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+library(tidyverse)
+source("src/common/feature_tables_functions.r")
+
+# takes pretty omics name and makes initial for easier network coloring
+omic_initials <- function(my_string){
+    initials <- stringr::str_split(my_string, '_') %>% 
+        lapply(., substr, start=1, stop=1) %>% 
+        lapply(., toupper) %>% 
+        unlist(.) %>% 
+        paste(collapse = '')
+    return(initials)
+}
+
+# reding/filtering helper For all_associations files
+read_halla_results <- function(my_file){
+    tmp <- stringr::str_split_i(my_file, pattern='/', i=4) # split path
+    a_x_type <- stringr::str_split_i(tmp, pattern='\\.',i=1) # split to x/y omic
+    a_y_type <- stringr::str_split_i(tmp, pattern='\\.',i=2)
+    a_x_initial <- omic_initials(a_x_type)
+    a_y_initial <- omic_initials(a_y_type)
+    print(paste("PROCESSING SIG CLUSTERS FROM: ", a_x_type,a_y_type))
+    
+    # IF from the same omic (self2self), remove self-loops; 
+    #   otherwise keep because nodes are not actually the same thing despite same name
+    # IF association is unreasonable, defined here as association > 1, drop the edge as it is very likely just noise
+    halla_ntwk <- read_tsv(my_file, name_repair = 'universal') %>% 
+        mutate(x_type=a_x_type, y_type=a_y_type) %>%
+        # mutate(X_features = paste(a_x_initial, X_features, sep='_'),  
+        #        Y_features = paste(a_y_initial, Y_features, sep='_')) %>%
+        mutate(FDR_Log = log10(q.values)*-1) %>%
+        filter(!(x_type == y_type & X_features==Y_features)) %>% #remove self loops for intra-omic
+        # Drop duplicate edges when omic is self-self
+        filter(
+            case_when(x_type == y_type & X_features > Y_features ~ FALSE,
+                      .default = TRUE)
+        ) %>% 
+        # filter(association<1.0) %>% # Originally to remove unrealistic values, but actually these values make sense given the interdependence of the varrying omics types. (i.e., theyre mostly self-self omics loops)
+        arrange(q.values) %>% 
+        rename(
+            Source = X_features,
+            Target = Y_features,
+            Source_Type = x_type,
+            Target_Type = y_type,
+            P = p.values,
+            FDR = q.values
+        )
+    
+    return(halla_ntwk)
+}
+
+
+# Takes sig cluster file and returns edge list; for sig_clusters files
+read_halla_clusters <- function(my_file){
+    tmp <- stringr::str_split_i(my_file, pattern='/', i=4) # split path
+    a_x_type <- stringr::str_split_i(tmp, pattern='\\.',i=1) # split to x/y omic
+    a_y_type <- stringr::str_split_i(tmp, pattern='\\.',i=2)
+    a_x_initial <- omic_initials(a_x_type)
+    a_y_initial <- omic_initials(a_y_type)
+    print(paste("PROCESSING SIG CLUSTERS FROM: ", a_x_type, a_y_type))
+    
+    # Split hyper-edge network file into edge list AND
+    # IF from the same omic (self2self), remove self-loops; 
+    #   otherwise keep because nodes are not actually the same thing despite same name
+    # NOTE: This filtering rescues 42 edges 
+    #   [41 uninteresting ones from amp_genus-amp_asv, and 1 interesting one from rna_taxonomy_bkn-culture]
+    halla_clusters <- read_tsv(my_file) %>% 
+        mutate(cluster_X = str_split(cluster_X,';'),
+               cluster_Y = str_split(cluster_Y,';')) %>% 
+        unnest(cluster_X) %>% 
+        unnest(cluster_Y) %>% 
+        mutate(x_type=a_x_type, y_type=a_y_type) %>% 
+        # Drop self loops when omic is self-self
+        filter(
+            case_when(x_type == y_type & cluster_X == cluster_Y ~ FALSE,
+                      .default = TRUE)
+        ) %>% 
+        # Drop duplicate edges when omic is self-self
+        filter(
+            case_when(x_type == y_type & cluster_X > cluster_Y ~ FALSE,
+                      .default = TRUE)
+        ) %>% 
+        rename(
+            Source = cluster_X,
+            Target = cluster_Y,
+            Source_Type = x_type,
+            Target_Type = y_type,
+            Cluster_FDR = best_adjusted_pvalue,
+            Cluster = cluster_rank
+        )
+    
+    print(paste("MAX HAllA CLUSTER RANK:", max(halla_clusters$Cluster)))
+    return(halla_clusters)
+}
+
+# Helper function for concatenating feature name and omic type just before saving network
+# Necessary to avoid collisions in cytoscape
+concatenate_feature_and_type <- function(a_halla_network){
+    a_halla_network <- a_halla_network %>% 
+        mutate(Source_Name = Source,
+               Target_Name = Target) %>% 
+        mutate(Source = sprintf("%s|%s", Source, Source_Type),
+               Target = sprintf("%s|%s", Target, Target_Type))
+    
+    return(a_halla_network)
+}
+
+get_spp_kos <- function(file_ko2taxa = "./halla/outputs/dna_taxonomy.dna_pfam/all_associations.txt",
+                        out_file = "tables/network/ko2taxa_counts.tsv"){
+    # Get genes that only strongly, positively associate with only a single taxa
+    # Remove so taxa and gene content profile aren't directly confounding
+    
+    ko2taxa <-read_halla_results(file_ko2taxa)
+    ko2taxa <- ko2taxa %>% filter(association > .6) 
+    
+    ko2taxa %>% 
+        group_by(Target) %>% 
+        mutate(n=n()) %>% 
+        ungroup() %>%
+        filter(n==1) %>% 
+        group_by(Source) %>% 
+        reframe(n_gene_families = n(), 
+                quantile = list(quantile(association))) %>% 
+        ungroup() %>% 
+        dplyr::rename(species = Source) %>% 
+        unnest_wider(quantile) %>% 
+        arrange(desc(n_gene_families)) %>% 
+        write_tsv(out_file)
+    
+    ko2taxa_counts <- ko2taxa %>% count(Target) 
+    
+    p.hist <-ggplot(ko2taxa_counts, aes(x=n)) + 
+        geom_histogram(color="black", fill="white")
+    
+    print(p.hist)
+    
+    spp_ko <- ko2taxa_counts %>% filter(n==1) %>% pluck('Target') 
+    
+    # # Sanity check
+    # ko2taxa %>% filter(Target %in% spp_ko) %>% count(Source) %>% arrange(desc(n)) %>% print(n=Inf)
+    # ko2taxa %>% filter(!Target %in% spp_ko) %>% count(Source) %>% arrange(desc(n)) %>% print(n=Inf)
+    
+    return(spp_ko)
+}
+
+spp_ko <- get_spp_kos()
+spp_ko
+# read_tsv("tables/ko2taxa_counts.tsv")
+
+# ASSOCIATIONS
+# get halla ASSOCIATION files with stats
+mox_halla_files <- list.files(path = './halla/outputs', 
+                              full.names=TRUE,
+                              recursive=TRUE, 
+                              pattern = "all_associations.txt")
+
+# read in files and filter by qvalues + top N (e.g., 200)
+mox_halla <- lapply(mox_halla_files, read_halla_results)
+mox_halla <- do.call("rbind", mox_halla) 
+# mox_halla %>% filter(association>0.5) %>% dim()
+# mox_halla %>% filter(FDR<0.05) %>% dim()
+
+
+# CLUSTERS
+# Get halla CLUSTER files 
+mox_halla_clusters <- list.files(path = './halla/outputs', 
+                                 full.names=TRUE,
+                                 recursive=TRUE, 
+                                 pattern = "sig_clusters.txt")
+
+mox_clusters <- lapply(mox_halla_clusters, read_halla_clusters)
+mox_clusters <- do.call("rbind", mox_clusters)
+
+
+# # Remove genes that only associate with a single taxa (e.g., showing that Candida have genes)
+mox_clusters <- mox_clusters %>%
+    filter(!(Source_Type == "dna_pfam" & Source %in% spp_ko)) %>%
+    filter(!(Target_Type == "dna_pfam" & Target %in% spp_ko)) # rm single spp kos
+
+print(max(mox_clusters$Cluster))
+
+# Plot cluster size histograms
+# Frequency of singletons within a halla run is high
+mox_clusters %>% 
+    count(Cluster, Source_Type, Target_Type) %>% 
+    arrange(n) %>% 
+    pluck('n') %>% 
+    log10(.) %>% 
+    hist(., xlab="Size of HAllA cluster (No. edges)", main="All data types")
+
+mox_clusters %>% 
+    filter(!(Source_Type=='dna_pfam' & Target_Type=='dna_pfam')) %>% 
+    count(Cluster, Source_Type, Target_Type) %>% 
+    arrange(n) %>% 
+    pluck('n') %>% 
+    log10(.) %>% 
+    hist(., xlab="Size of HAllA cluster (No. edges)", main="Data types except\n(DNA [PFAM]:DNA [PFAM])")
+
+# Plot feature degree histograms
+# Frequency of singletons (n==2) is lower but still high if we include connections across all halla runs
+mox_clusters %>% 
+    dplyr::select(Source, Target) %>% 
+    pivot_longer(cols = everything(), names_to = NULL, values_to = 'var') %>%
+    count(var, name = "count") %>% 
+    pluck('count') %>%
+    hist(.,breaks = 100, xlab="Feature degree", main="All data types") 
+
+mox_clusters %>% 
+    filter(!(Source_Type=='dna_pfam' & Target_Type=='dna_pfam')) %>% 
+    dplyr::select(Source, Target) %>% 
+    pivot_longer(cols = everything(), names_to = NULL, values_to = 'var') %>%
+    count(var, name = "count") %>% 
+    pluck('count') %>%
+    hist(.,breaks = 100, xlab="Feature degree", main="Data types except\n(DNA [PFAM]:DNA [PFAM])")
+
+mox_clusters %>% 
+    filter((Source_Type=='dna_pfam' & Target_Type=='dna_pfam')) %>% 
+    dplyr::select(Source, Target) %>% 
+    pivot_longer(cols = everything(), names_to = NULL, values_to = 'var') %>%
+    count(var, name = "count") %>% 
+    pluck('count') %>%
+    hist(.,breaks = 100, xlab="Feature degree", main="Only\nDNA [PFAM]:DNA [PFAM]")
+
+mox_clusters %>% 
+    filter(Source_Type==Target_Type) %>% 
+    dplyr::select(Source, Target) %>% 
+    pivot_longer(cols = everything(), names_to = NULL, values_to = 'var') %>%
+    count(var, name = "count") %>% 
+    pluck('count') %>%
+    hist(.,breaks = 100, xlab="Feature degree", main="Only self-self")
+
+mox_clusters %>% 
+    filter(Source_Type!=Target_Type) %>% 
+    dplyr::select(Source, Target) %>% 
+    pivot_longer(cols = everything(), names_to = NULL, values_to = 'var') %>%
+    count(var, name = "count") %>% 
+    pluck('count') %>%
+    hist(.,breaks = 100, xlab="Feature degree", main="Only self-other")
+
+
+# CRITCAL STEP:
+# (1) Inner join/combin3 cluster table and pairwise association table (Combine associations and clusters; subset by intersection)
+# (2) Important aesthetic - Add Edge Type attribute 
+# (2) Non-critical aesthetic - Clean order for easier interpretation
+mox_halla2 <-mox_halla %>% 
+    inner_join(mox_clusters, by=c('Source'='Source','Target'='Target','Source_Type', 'Target_Type')) %>% 
+    mutate(Edge_Type = paste(Source_Type, Target_Type, sep = "|")) %>% 
+    dplyr::select(Source, Target, Source_Type, Target_Type, Edge_Type, FDR, Cluster, Cluster_FDR, everything())
+    # drop_na(Cluster) # Use if doing left join instead of inner or right - switch depending on question and desired inclusion criteria
+
+
+# Filter (1) genus-level amplicon results in favor of asvs & rna_mpa for rna_bkn;
+#       (2) MGX PFAM:MGX PFAM associations; 
+mox_halla2 <- mox_halla2 %>% 
+    filter(str_detect(Edge_Type, "amp_genus", negate=T),
+           str_detect(Edge_Type, "rna_taxonomy_mpa", negate=T),
+           !(Source_Type == 'dna_pfam' & Target_Type == 'dna_pfam')) 
+
+
+# Superseded by connection based inclusion criteria
+# mox_halla2 <- mox_halla2 %>% filter(Cluster < 100)
+
+
+# Sanity Check Q values and Associations
+max(mox_halla2$FDR)
+min(mox_halla2$FDR)
+max(mox_halla2$association)
+min(mox_halla2$association)
+
+
+# Filter by significance criteria & (2) min association
+mox_halla2 <- mox_halla2 %>%
+    filter(FDR < 0.05)  %>% 
+    filter(abs(association) > .2) %>% 
+    arrange(FDR)
+
+write_tsv(mox_halla2 %>% concatenate_feature_and_type(), 'tables/network/halla_network_full.tsv') 
+
+# Filter by (1) lowest N q values within Edge_Type 
+mox_halla2 <- mox_halla2 %>% 
+    arrange(FDR) %>% 
+    group_by(Edge_Type) %>% 
+    mutate(rank = row_number()) %>% 
+    filter(rank < 100) %>% 
+    ungroup()
+
+
+
+# Split network into self-other and self-self
+# Subset self-self connections
+self2self <- mox_halla2 %>% filter(Source_Type == Target_Type) # Note this has ver small q values
+write_tsv(self2self %>% concatenate_feature_and_type(), 'tables/network/halla_network_self2self_clean.tsv')
+
+
+# Remove self-self connections
+mox_halla2 <- mox_halla2 %>% filter(Source_Type != Target_Type) 
+mox_halla2 %>% count(Edge_Type) %>% arrange(n) %>% print(n=100)
+mox_halla2 %>% count(Edge_Type) %>% arrange(Edge_Type) %>% print(n=100)
+write_tsv(mox_halla2 %>% concatenate_feature_and_type(), 'tables/network/halla_network_clean.tsv')
+
+
+#################
+# For converting type to standard naming convention
+source("src/common/load_features.r")
+types_map <- names(mox_feature_list) %>% 
+    c(., "metadata") %>% 
+    as_tibble() %>% 
+    mutate(type = janitor::make_clean_names(value)) 
+
+# Make Nodes Table for Network
+nodes_x <- mox_halla2 %>% dplyr::select(Source, Source_Type) %>% rename(feature='Source', type='Source_Type')
+nodes_y <- mox_halla2 %>% dplyr::select(Target, Target_Type) %>% rename(feature='Target', type='Target_Type')
+nodes <- rbind(nodes_x, nodes_y) %>% unique()
+
+source("src/common/clean_feature_names.r")
+
+# Fix Features to be pretty
+nodes_table <- nodes %>%
+    rowwise() %>% 
+    mutate(feature_pretty = as.character(possibly(fix_features, otherwise = NA_real_)(feature)))
+
+# Remove italics and add omics types
+nodes_table <- nodes_table %>%  
+    mutate(feature_pretty = str_remove(string = feature_pretty, pattern="italic\\(\""),
+           feature_pretty = str_remove(string = feature_pretty, pattern="\"\\)")) %>% 
+    rename(ID = feature) %>% 
+    left_join(types_map) %>% 
+    rename(type_pretty = value) %>% 
+    mutate(ID = sprintf("%s|%s", ID, type))
+
+write_tsv(nodes_table, 'tables/network/nodes_table.tsv')
+
+# # IF ENSEMBL DOWN
+# nodes_table <- nodes %>% rename(ID = feature)
+# write_tsv(nodes_table, 'halla/nodes_table.tsv')
+
+##############
+source("src/common/load_lists.r")
+
+# Read in differentially abundant features between pneumotypes
+clusters<- readRDS('objects/mox/MOX_01_maaslin_results.rds')$Clusters
+
+# Compress results to one file
+for (i in seq_along(clusters)){
+    clusters[[i]] <- clusters[[i]]$results %>% mutate(type = janitor::make_clean_names(names(clusters)[[i]]))
+}
+
+# Make node object compatible with Maaslin2 renaming conventions & New vectors
+nodes_maaslin <- nodes %>% 
+    mutate(ID = sprintf("%s|%s", feature, type)) %>% 
+    mutate(feature = vctrs::vec_as_names(feature, repair = "universal_quiet"))
+
+# Get features uniquely up between pneumotypes
+# If feature is down in all pneumtypes, that means its uniquely up in pneumotype 1, the baseline for the fixed effects
+clusters_table <- clusters %>% 
+    reduce(bind_rows) %>% 
+    filter(qval <.05) %>% 
+    mutate(name = case_when(coef < 0 ~ 'cluster_num_amplicon1_tail', .default = name), # Negative coef = high in cluster 1 (used as baseline)
+           value = case_when(coef < 0 ~ '1', .default = value)) %>% 
+    
+    # Combine node list and differntial abundances
+    inner_join(nodes_maaslin) %>% # Join by type and feature
+    rename(feature_maaslin = feature) %>% 
+    as_tibble() %>% 
+    dplyr::select(ID, feature_maaslin, name, value) %>% 
+    unique() %>% 
+    
+    # Create specific columns for pneumotypes
+    pivot_wider(names_from = name, values_from = value, values_fill = '') %>% 
+    mutate(cluster_num_amplicon_all = paste(cluster_num_amplicon1_tail, cluster_num_amplicon2,cluster_num_amplicon3, cluster_num_amplicon4, sep = '')) %>% 
+    mutate(Pneumotype_Relative_Enriched = case_when(cluster_num_amplicon_all %in% c("1", "2", "3", "4") ~ cluster_num_amplicon_all, 
+                                                    .default ="Nonspecific"), .after=feature_maaslin) %>% 
+    arrange(Pneumotype_Relative_Enriched) %>% 
+    
+    # Add Colors
+    left_join(enframe(mox_color_lists[["cluster_num_amplicon"]],
+                      name = "Pneumotype_Relative_Enriched", value = "Pneumotype_Color")) %>% 
+    relocate(Pneumotype_Color, .after = Pneumotype_Relative_Enriched)
+
+write_tsv(clusters_table, 'tables/network/clusters_table.tsv')
+##################################################################
+
+source("src/common/nature_theme.r")
+plot_many_mox <- function(vector_features_i, vector_features_j, vector_types_i, vector_types_j, vector_p, vector_rho, vector_cluster){
+    
+    plot_list <- list()
+    
+    for (i in seq_along(vector_features_i)){
+        print(paste(i, vector_features_i[[i]], vector_features_j[[i]]))
+        halla_annotation = sprintf("FDR(P):%s rho:%s block:%s", 
+                                   formatC(vector_p[[i]],format = "e", digits = 1), 
+                                   round(vector_rho[[i]], digits = 2),
+                                   vector_cluster[[i]])
+        
+        # Get Axis Labels
+        my_x <<- fix_features(vector_features_i[[i]]) %>% 
+            str_remove(string = ., pattern="italic\\(\"") %>% 
+            str_remove(string = ., pattern="\"\\)") %>% 
+            str_remove_all(string=.,pattern="\\\"") %>% 
+            str_wrap(string = ., width=40, whitespace_only = T)
+        xlab <-paste0(my_x, "\n", vector_types_i[[i]])
+    
+        my_y <<- fix_features(vector_features_j[[i]]) %>% 
+            str_remove(string = ., pattern="italic\\(\"") %>% 
+            str_remove(string = ., pattern="\"\\)") %>% 
+            str_remove_all(string=.,pattern="\\\"") %>% 
+            str_wrap(string = ., width=40, whitespace_only = T)
+        ylab <-paste0(my_y, "\n", vector_types_j[[i]])
+        
+        
+        #Plot
+        a_plot <- plot_2_mox(
+            feature_table_1 = mox_feature_list[[vector_types_i[[i]]]],
+            feature_table_2 = mox_feature_list[[vector_types_j[[i]]]] ,
+            feature_1 = vector_features_i[[i]],
+            feature_2 = vector_features_j[[i]],
+            my_alpha = .5,
+            my_fill = "darkgrey",
+            my_color = "black") + 
+            labs(x=xlab, 
+                 y=ylab) +
+            theme_nature() +
+            theme(axis.title = element_text(size=6))
+    
+        a_plot <- a_plot + 
+            annotate("text", 
+                     x = max(a_plot$data[[2]])*1.01, 
+                     y = max(a_plot$data[[3]])*1.1, 
+                     label = str_wrap(halla_annotation, width = 5),
+                     hjust=1,
+                     vjust=1,
+                     size=2.5)
+        
+        print(a_plot)
+        
+        plot_list[[i]] <- a_plot
+    }
+    return(plot_list)
+}
+
+
+# Rename type to be standard style
+omic2omic <- mox_halla2 %>% 
+    left_join(types_map, by=c("Source_Type"="type")) %>% 
+    mutate(Source_Type=value) %>% 
+    select(!value) %>% 
+    left_join(types_map, by=c("Target_Type"="type")) %>% 
+    mutate(Target_Type=value) %>% 
+    select(!value) 
+
+# Drop Metadata for quant comparisons & drop abx
+omic2omic <- omic2omic %>% 
+    filter(str_detect(Edge_Type, "metadata", negate=T)) %>% 
+    filter(str_detect(Edge_Type, "abx", negate=T))
+
+# Order for easy navigation
+omic2omic <- omic2omic %>% 
+    arrange(Edge_Type, FDR)
+
+# HAllA removed a trailing space
+omic2omic <- omic2omic %>% 
+    mutate(Source = str_replace(Source, "ENSG00000272980:", "ENSG00000272980: "))
+
+# omic2omic <- tail(omic2omic, 3)
+pdf("figures/network_and_mox/mox_halla_associations_sub.pdf", height = 1.71, width=1.61)
+p_list <- plot_many_mox(omic2omic$Source, 
+              omic2omic$Target, 
+              omic2omic$Source_Type, 
+              omic2omic$Target_Type,
+              omic2omic$FDR,
+              omic2omic$association,
+              omic2omic$Cluster
+              )
+dev.off()
+
+library(patchwork)
+selected_regressions <- 
+    p_list[[981]] + p_list[[126]] + p_list[[150]] +
+    p_list[[397]] + p_list[[354]] + p_list[[478]] +
+    p_list[[803]] + p_list[[805]] + p_list[[454]]
+
+selected_regressions <- selected_regressions + 
+    plot_layout(ncol = 3) & theme(plot.margin = unit(c(5,1,5,1), "pt"))
+selected_regressions
+ggsave("figures/network_and_mox/selected_regressions.pdf",selected_regressions, units="in", width=4.60, height=5.72)
+# Rename type to be standard style
+self2self <- self2self %>% 
+    left_join(types_map, by=c("Source_Type"="type")) %>% 
+    mutate(Source_Type=value) %>% 
+    select(!value) %>% 
+    left_join(types_map, by=c("Target_Type"="type")) %>% 
+    mutate(Target_Type=value) %>% 
+    select(!value) 
+
+# Drop Metadata for quant comparisons
+self2self <- self2self %>% 
+    filter(str_detect(Edge_Type, "metadata", negate=T)) %>% 
+    filter(str_detect(Edge_Type, "abx", negate=T))
+
+# Order for easy navigation
+self2self <- self2self %>% 
+    arrange(Edge_Type,Cluster_FDR, Cluster, FDR)
+
+pdf("figures/network_and_mox/mox_halla_self2self_associations.pdf", height = 1.71, width=1.61)
+plot_many_mox(self2self$Source, 
+              self2self$Target, 
+              self2self$Source_Type, 
+              self2self$Target_Type,
+              self2self$FDR,
+              self2self$association,
+              self2self$Cluster
+)
+dev.off()
+
+```
+

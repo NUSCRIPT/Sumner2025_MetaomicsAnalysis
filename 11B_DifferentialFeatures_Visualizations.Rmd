@@ -1,0 +1,552 @@
+---
+title: "Differential Features Visualization"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+source("src/common/load_metadata.r")
+source('src/common/load_features.r')
+source("src/common/nature_theme.r")
+source("src/common/graph_features.r")
+source('src/common/load_lists.r')
+source('src/common/get_clusters.r')
+library(patchwork)
+library(tidyverse)
+library(ggpubr)
+```
+
+
+# Helper functions
+## Maaslin2 execution
+```{r}
+library(Maaslin2)
+set.seed(1234567)
+
+
+# Helper function that takes maaslin object and returns top 0-10 features (qval)
+get_top_features <- function(maaslin_out, my_category='Episode_etiology', num_features=10, min_qval=.05) {
+  maaslin_out$results %>%
+    filter(metadata %in% my_category,
+           qval < min_qval) %>%
+    arrange(qval) %>%
+    arrange(desc(abs(coef))) %>%
+    dplyr::select(feature) %>%
+    unique() %>%
+    head(num_features) %>%
+    pluck("feature")
+}
+
+# Visualize top N features from results 
+
+# Helper function to iterate through maaslin results and plot for several metadata features
+# <my_features_list> = list of omics from load_features
+# <my_maaslin_list> = list of maaslin results w/ same names as in my_features_list
+# <maaslin_category> = string of a metadata feature used as fixed effect in maaslin
+# <a_group> = string of a metadat group to orient graph_features fuction 
+# <a_baseline> = string of a subset in group to be relative 
+plot_multiomics <- function(my_features_list, my_maaslin_list, 
+                            maaslin_category, a_group, a_baseline, 
+                            my_x_lab= bquote(''~log[2]~"(abund./median abund.)")){
+  multiomics_plots <- list()
+  for (i in seq_along(my_features_list)){
+    
+    pretty_i <- names(my_features_list)[[i]]
+    print(pretty_i)
+    if (pretty_i == 'DNA [PFAM]') {num_feat = 10} else {num_feat = 5}
+    my_top_features <<- get_top_features(my_maaslin_list[[pretty_i]], 
+                                         my_category = maaslin_category, 
+                                         min_qval=.05, 
+                                         num_features = num_feat)
+    if(length(my_top_features) == 0){
+      print("NO SIGNIFICANT FEATURES")
+      features_plot <- ggplot()
+    } else {
+      features_plot <- graph_features(my_features_list[[i]], 
+                                      my_top_features, 
+                                      groups_df = meta_mas %>% 
+                                        filter(sample_name %in% colnames(my_features_list[[i]])) %>% drop_na(a_group), 
+                                      feature_col_name = "feature", 
+                                      group_col_name = a_group, 
+                                      baseline_group = a_baseline,
+                                      scale_val=5, make_names = T
+      ) + xlab(my_x_lab) 
+      
+    }
+    multiomics_plots[[pretty_i]] <- features_plot #+ theme(axis.title.x = element_text(hjust=-.05))
+  }
+  return(multiomics_plots)
+}
+
+```
+# Load Data
+```{r}
+mox_maaslin_list <- readRDS('objects/mox/MOX_01_maaslin_results.rds')
+meta_mas <- readRDS('objects/mox/MOX_02_MetaMas.rds')
+```
+
+# Sumarize maaslin2
+```{r}
+# Takes maaslin list object and returns dataframe with num significant features
+summarize_maaslin <- function(mox_maaslin_list){
+  df <- tibble(
+    omic = character(),
+    model = character(),
+    n_significant_results = numeric(),
+    n_significant_features = numeric()
+  )
+  
+  categories <- names(mox_maaslin_list)
+  # Seq through maaslin differential categories (i = Culture,...)
+  for (i in seq_along(mox_maaslin_list)){
+    i_category <- categories[i]
+    omics <- names(mox_maaslin_list[[i]])
+    
+    # Seq through omics results within the categories (j = AMP [ASV],...)
+    for (j in seq_along(mox_maaslin_list[[i]])){
+      j_omic <- omics[j]
+      results <- mox_maaslin_list[[i]][[j]]$results
+      
+      sig_results <- results %>% filter(qval < 0.05)
+      num_significant <- sig_results %>% pluck("feature") %>% length()
+      num_significant_unique <- sig_results %>% pluck("feature") %>% unique() %>% length()
+      
+      df <- df %>% add_row(
+        omic = j_omic, 
+        model = i_category, 
+        n_significant_results = num_significant, 
+        n_significant_features = num_significant_unique
+      )
+    }
+  }
+  return(df)
+}
+
+df_prev05 <-summarize_maaslin(mox_maaslin_list)
+df_prev05
+```
+```{r}
+undo_log2p <- function(feature_list){
+  feature_list <- feature_list %>% 
+    tidy_features() %>% 
+    mutate(value = ((2^value)-1)/100) %>% 
+    wide_features()
+}
+mox_feature_list <- lapply(mox_feature_list, undo_log2p)
+```
+
+# Plot Features
+```{r}
+source("src/common/graph_features.r")
+cool_features <- names(mox_maaslin_list[['Culture']])
+cool_features <- c("AMP [Genus]",  "DNA [Taxonomy]", "DNA [PFAM]", "RNA [Taxonomy BKN]", "DNA [Viral]", "RNA [PFAM]","AMP [ASV]")
+
+mfe = c('Episode_category')
+mr = 'Episode_category,NPC'
+mox_plots_Category <- plot_multiomics(my_features_list = mox_feature_list[cool_features], my_maaslin_list = mox_maaslin_list[['Category']], maaslin_category = mfe,  a_group = str_split(mr, ',', simplify = T)[[1]], a_baseline = str_split(mr, ',', simplify = T)[[2]])
+mox_plots_Category[[1]]
+
+mfe = c('Episode_is_cured')
+mr = 'Episode_is_cured,NPC'
+mox_plots_Success <- plot_multiomics(my_features_list = mox_feature_list[cool_features], my_maaslin_list = mox_maaslin_list[['Success']], maaslin_category = mfe,  a_group = str_split(mr, ',', simplify = T)[[1]], a_baseline = str_split(mr, ',', simplify = T)[[2]])
+
+mfe = c('bacteria_positive')
+mr = 'bacteria_positive,Negative'
+mox_plots_Culture <- plot_multiomics(my_features_list = mox_feature_list[cool_features], my_maaslin_list = mox_maaslin_list[['Culture']], maaslin_category = mfe,  a_group = str_split(mr, ',', simplify = T)[[1]], a_baseline = str_split(mr, ',', simplify = T)[[2]])
+
+mfe = c('Episode_etiology')
+mr = 'Episode_etiology,NPC'
+mox_plots_Etiology <- plot_multiomics(my_features_list = mox_feature_list[cool_features], my_maaslin_list = mox_maaslin_list[["Etiology"]], maaslin_category = mfe,  a_group = str_split(mr, ',', simplify = T)[[1]], a_baseline = str_split(mr, ',', simplify = T)[[2]])
+
+mfe = c('dysbiotic')
+mr = 'dysbiotic,FALSE'
+mox_plots_Dysbiotic <- plot_multiomics(my_features_list = mox_feature_list[cool_features], my_maaslin_list = mox_maaslin_list[['Dysbiotic']], maaslin_category = mfe,  a_group = str_split(mr, ',', simplify = T)[[1]], a_baseline = str_split(mr, ',', simplify = T)[[2]])
+
+mfe = c('cluster_num_amplicon')
+mr = 'cluster_num_amplicon,1'
+mox_plots_Cluster <- plot_multiomics(my_features_list = mox_feature_list[cool_features], my_maaslin_list = mox_maaslin_list[['Clusters']], maaslin_category = mfe,  a_group = str_split(mr, ',', simplify = T)[[1]], a_baseline = str_split(mr, ',', simplify = T)[[2]])
+# 
+
+```
+## Save Features
+```{r}
+cat <- (mox_plots_Category[[1]] +mox_plots_Category[[2]] +mox_plots_Category[[3]]+ guide_area()+
+          plot_layout(guides='collect',ncol=1,heights=c(5,2,10,1),axis_titles  = 'collect_x'))
+
+suc <- (mox_plots_Success[[1]] +mox_plots_Success[[2]] +mox_plots_Success[[3]]+ guide_area()+
+          plot_layout(guides='collect',ncol=1,heights=c(5,1,10,1),axis_titles  = 'collect_x'))
+
+dys <- (mox_plots_Dysbiotic[[1]] +mox_plots_Dysbiotic[[2]] +mox_plots_Dysbiotic[[3]]+ guide_area()+
+          plot_layout(guides='collect',ncol=1,heights=c(5,5,10,1),axis_titles  = 'collect_x'))
+
+cult <- (mox_plots_Culture[[1]] +mox_plots_Culture[[2]] +mox_plots_Culture[[3]]+ guide_area()+
+           plot_layout(guides='collect',ncol=1,heights=c(5,3,10,1),axis_titles  = 'collect_x'))
+
+clust <- (mox_plots_Cluster[[1]] +mox_plots_Cluster[[2]] +mox_plots_Cluster[[3]]+ guide_area()+
+            plot_layout(guides='collect',ncol=1,heights=c(5,5,10,1),axis_titles  = 'collect_x'))
+
+
+ggsave('figures/ZLR/zlr_category.pdf', cat, units = 'in', width = 1.86, height = 6.89)
+ggsave('figures/ZLR/zlr_success.pdf', suc, units = 'in', width = 1.86, height = 6.89)
+ggsave('figures/ZLR/zlr_dysbiosis.pdf', dys, units = 'in', width = 1.86, height = 6.42)
+ggsave('figures/ZLR/zlr_culture.pdf', cult, units = 'in', width = 1.86, height = 6.08)
+ggsave('figures/ZLR/zlr_clusters.pdf', clust, units = 'in', width = 1.86, height = 9)
+
+```
+
+
+# Violin Plots
+```{r, message=FALSE}
+
+
+source('src/common/graph_violin.r')
+
+# Culture Violin Plots
+p_culture_amylase <- ggplot(meta_mas %>% drop_na(dysbiotic, amylase_bf), 
+                            aes(x=bacteria_positive, y=log10(amylase_bf), fill=bacteria_positive)) %>% 
+  plot_violin()  %>% 
+  plot_statistics(.) +
+  theme(legend.position = 'right') +
+  scale_fill_manual(values=mox_color_lists[['bacteria_positive']]) +
+  labs(x='Culture', y=bquote(Log[10]~'amylase')) 
+# ylim(-.5,7.5)
+p_culture_amylase
+
+p_culture_dysbiosis <- ggplot(meta_mas %>% drop_na(dysbiotic, bacteria_positive), 
+                              aes(x=bacteria_positive, y=dysbiosis_score, fill=bacteria_positive)) %>% 
+  plot_violin()  %>% 
+  plot_statistics(.) +
+  theme(legend.position = 'right') +
+  scale_fill_manual(values=mox_color_lists[['bacteria_positive']]) +
+  labs(x='Culture', y='MDNP score') 
+# ylim(0, 1.1)
+p_culture_dysbiosis
+
+p_culture_qpcr <- ggplot(meta_mas %>% drop_na(Quantity.Mean.Log, bacteria_positive), 
+                         aes(x=bacteria_positive, y=Quantity.Mean.Log, fill=bacteria_positive)) %>% 
+  plot_violin()  %>% 
+  plot_statistics(.) +
+  theme(legend.position = 'right') +
+  scale_fill_manual(values=mox_color_lists[['bacteria_positive']]) +
+  labs(x='Culture', y=bquote(Log[10]~'16S gene cp.'))
+# ylim(-1,11)
+p_culture_qpcr
+
+
+
+# Dysbiotic Violin Plots
+p_dysbiotic_amylase <- ggplot(meta_mas %>% drop_na(dysbiotic, amylase_bf), 
+                              aes(x=dysbiotic, y=log10(amylase_bf), fill=dysbiotic)) %>% 
+  plot_violin()  %>% 
+  plot_statistics(.) +
+  theme(legend.position = 'right') +
+  scale_fill_manual(values=mox_color_lists[['dysbiotic']]) +
+  labs(x=bquote(90^th~"MDNP"), y=bquote(Log[10]~'amylase')) 
+# ylim(-.5,7.5)
+
+p_dysbiotic_amylase
+
+p_dysbiotic_dysbiosis <- ggplot(meta_mas %>% drop_na(dysbiotic), 
+                                aes(x=dysbiotic, y=dysbiosis_score, fill=dysbiotic)) %>% 
+  plot_violin()  %>% 
+  plot_statistics(.) +
+  theme(legend.position = 'right') +
+  scale_fill_manual(values=mox_color_lists[['dysbiotic']]) +
+  labs(x=bquote(90^th~"MDNP"), y='MDNP score') 
+# ylim(0, 1.1)
+p_dysbiotic_dysbiosis
+
+p_dysbiotic_qpcr <- ggplot(meta_mas %>% drop_na(Quantity.Mean.Log, dysbiotic), 
+                           aes(x=dysbiotic, y=Quantity.Mean.Log, fill=dysbiotic)) %>% 
+  plot_violin()  %>% 
+  plot_statistics(.) +
+  theme(legend.position = 'right') +
+  scale_fill_manual(values=mox_color_lists[['dysbiotic']]) +
+  labs(x=bquote(90^th~"MDNP"), y=bquote(Log[10]~'16S gene cp.')) 
+# ylim(-1,11)
+p_dysbiotic_qpcr
+
+
+# ABX
+p_abx_amylase <- ggplot(meta_mas %>% drop_na(antibiotics_flag, amylase_bf), 
+                        aes(x=factor(antibiotics_flag), y=amylase_bf_log, fill=factor(antibiotics_flag))) %>% 
+  plot_violin()  %>% 
+  plot_statistics(.) +  # plot_statistics(.) +
+  theme(legend.position = 'right') +
+  scale_fill_manual(values=mox_color_lists[['antibiotics_flag']]) +
+  labs(x='Antibiotics', y=bquote(Log[10]~'amylase')) 
+# ylim(-.5,7.5)
+p_abx_amylase
+
+p_abx_dysbiosis <- ggplot(meta_mas %>% drop_na(dysbiotic, antibiotics_flag), 
+                          aes(x=factor(antibiotics_flag), y=dysbiosis_score, fill=factor(antibiotics_flag))) %>% 
+  plot_violin()  %>% 
+  plot_statistics(.) +
+  theme(legend.position = 'right') +
+  scale_fill_manual(values=mox_color_lists[['antibiotics_flag']]) +
+  labs(x='Antibiotics', y='MDNP score') 
+# ylim(0, 1.1)
+p_abx_dysbiosis
+
+p_abx_qpcr <- ggplot(meta_mas %>% drop_na(Quantity.Mean.Log, antibiotics_flag), 
+                     aes(x=factor(antibiotics_flag), y=Quantity.Mean.Log, fill=factor(antibiotics_flag))) %>% 
+  plot_violin()  %>% 
+  plot_statistics(.) +
+  theme(legend.position = 'right') +
+  scale_fill_manual(values=mox_color_lists[['antibiotics_flag']]) +
+  labs(x='Antibiotics', y=bquote(Log[10]~'16S gene cp.'))
+# ylim(-1,11)
+p_abx_qpcr
+```
+
+```{r}
+dt_long <- permmeta %>% 
+  select(sample_name, amylase_bf_log, Quantity.Mean.Log, dysbiosis_score, 
+         bacteria_positive, antibiotics_flag, Episode_category, dysbiotic) %>% #Episode_is_cured?
+  mutate(bacteria_positive = as.character(bacteria_positive),
+         dysbiotic = as.character(dysbiotic)) %>%
+  pivot_longer(cols=c(bacteria_positive, antibiotics_flag, Episode_category,dysbiotic),
+               names_to = 'cat', 
+               values_to = 'cat_values') %>% 
+  pivot_longer(cols = c(amylase_bf_log, Quantity.Mean.Log, dysbiosis_score),
+               names_to = 'quant',
+               values_to = 'quant_values') %>% 
+  mutate(cat_values = case_when(cat_values == "No pathogen identified" ~ 'No_path', .default = cat_values)) %>% 
+  filter(cat_values != "No pathogen identified",
+         cat_values != '2') %>% 
+  drop_na(cat_values, quant_values) %>% 
+  arrange(cat, cat_values) %>% 
+  mutate(y_min = case_when(quant == 'amylase_bf_log' ~ 1,
+                           quant == 'dysbiosis_score' ~ .3,
+                           quant == 'Quantity.Mean.Log' ~ 0,
+                           .default = 0),
+         y_max = case_when(quant == 'amylase_bf_log' ~ 6,
+                           quant == 'dysbiosis_score' ~ 1,
+                           quant == 'Quantity.Mean.Log' ~ 9,
+                           .default = 0),
+  )
+
+ggplot(dt_long, aes(x=cat_values, y=quant_values))  %>% 
+  plot_violin(.) +#%>% 
+  # plot_statistics(.) +
+  facet_grid(rows = vars(quant), cols=vars(cat),axes='all', scale='free') + 
+  theme(axis.text.x=element_text())
+
+some_violin_plot <- function(df){
+  a_plot <- df %>%   ggplot(aes(x=cat_values, y=quant_values, fill=cat_values))  %>% 
+    plot_violin(.) %>% 
+    plot_statistics(.) +
+    facet_grid(rows = vars(quant),axes='all', scale='free',axis.labels = 'margins',switch='y')+
+    theme(axis.text.x=element_text(), 
+          strip.placement = 'outer',
+          # strip.text.y = element_blank()
+    ) +
+    xlab(NULL) + ylab(NULL)
+  return(a_plot)
+}
+
+tmp1<- dt_long %>% 
+  filter(cat=='bacteria_positive') %>% 
+  some_violin_plot +
+  scale_fill_manual(values=mox_color_lists[['bacteria_positive']]) +
+  geom_blank(aes(y = y_min)) +
+  geom_blank(aes(y = y_max))
+
+tmp2<- dt_long %>% 
+  filter(cat=='antibiotics_flag') %>% 
+  some_violin_plot +
+  scale_fill_manual(values=c('#6a81a5', '#a2bbd4','#a2bbd4')) +
+  geom_blank(aes(y = y_min)) +
+  geom_blank(aes(y = y_max))
+
+tmp3<- dt_long %>% 
+  filter(cat=='Episode_category') %>% 
+  some_violin_plot +
+  scale_fill_manual(values=mox_color_lists[['Episode_category']]) +
+  geom_blank(aes(y = y_min)) +
+  geom_blank(aes(y = y_max))
+
+tmp5<- dt_long %>% 
+  filter(cat=='dysbiotic') %>% 
+  some_violin_plot +
+  scale_fill_manual(values=c('#a9c3a4', '#3A7345')) +
+  geom_blank(aes(y = y_min)) +
+  geom_blank(aes(y = y_max))
+
+many_violins <- tmp1 + tmp5+ tmp2 + tmp3 +
+  plot_layout(ncol=4,axis_titles = 'collect', widths = c(2,2,2,4))
+
+many_violins
+ggsave('figures/figure2_violins.pdf',many_violins, 
+       units="in", height = 3.07, width = 4.3, device = cairo_pdf)
+
+# TODO = fix plot statistics so it doesnt expand scale, therefore keeping all these scales the same even if nothing is significant.
+
+```
+
+
+# Amylase heatmaps
+```{r}
+
+source('src/common/load_features.r')
+drop_samples()
+# Add to be able to subset
+get_alpha()
+
+# Get amylase associated features from maaslin results
+amy_samples <- permmeta %>% 
+  drop_na(amylase_bf_log, cluster_num_amplicon) %>% 
+  arrange(amylase_bf_log, dysbiosis_score)  %>% 
+  # filter(!sample_name %in% flip_lst) %>%
+  pluck('sample_name')
+amy_annot <-  permmeta %>% 
+  filter(sample_name  %in% amy_samples) %>% 
+  select(sample_name, dysbiosis_score, amylase_bf_log, cluster_num_amplicon) %>% 
+  arrange(factor(sample_name, levels=amy_samples)) %>% 
+  column_to_rownames('sample_name')
+amy_features <- mox_maaslin_list$Amylase[["AMP [Genus]"]]$results %>%
+  # filter(coef>0) %>%
+  filter(qval<0.05) %>% 
+  arrange(desc(coef)) %>%
+  slice_max(qval, n=15) %>% 
+  arrange(desc(coef)) %>% 
+  distinct(feature) %>% 
+  pluck("feature") #%>% head(15)
+amy_ord_features <- mox_feature_list[["AMP [Genus]"]] %>% 
+  tidy_features() %>% 
+  mutate(value = case_when(value == 0 ~ NA, .default = value)) %>% 
+  wide_features() %>% 
+  select(any_of(c('feature', amy_samples))) %>% 
+  filter(make.names(feature) %in% amy_features) %>% 
+  arrange(factor(feature, levels=amy_features)) %>% 
+  mutate(feature = fix_asv(feature)) %>% 
+  column_to_rownames('feature')
+
+library(ggplotify)
+library(ComplexHeatmap)
+library(circlize)
+
+col_fun = colorRamp2(c(0.5, 5.5), c("white", "blueviolet"))
+col_fun2 = colorRamp2(c(0,dysbiosis_cutoff, 1), c("white","#a9c3a4", "#7ea679")) 
+
+# For MDNP and amylase annotation bars
+column_ha = HeatmapAnnotation(Amylase = amy_annot$amylase_bf_log,
+                              MDNP = amy_annot$dysbiosis_score,
+                              annotation_name_gp = gpar(fontsize = 7),
+                              col = list(Amylase = col_fun,
+                                         MDNP = col_fun2),
+                              border = T,
+                              simple_anno_size = unit(.5, 'cm'),
+                              annotation_legend_param = list(
+                                labels_gp = gpar(fontsize = 5),
+                                title_gp=gpar(fontface ="bold",fontsize= 7), 
+                                legend_height= unit(1, "cm"),
+                                # direction = "horizontal",
+                                title_position="leftcenter-rot",
+                                legend_width = unit(.25, "cm"),
+                                border='black')
+)
+
+pdf('figures/complex_amylase_heat.pdf',width = 4.75, height=2.28)
+ht_list <- Heatmap(as.matrix(amy_ord_features), #scale(amy_ord_features,center = T,scale = T) ,
+                   name='taxa',
+                   show_column_names = FALSE, 
+                   row_dend_width = unit(.1, "cm"), 
+                   show_row_dend = F,
+                   cluster_columns = F,
+                   show_column_dend=F,
+                   cluster_rows = F,
+                   # clustering_distance_rows = "euclidean",#clustering_method_rows = "complete",
+                   row_names_gp = gpar(fontsize = 7),
+                   col = colorRamp2(c(log2(1.000001), log2(101)), c("#a2bbd4", "darkblue")),#viridis(100),#colors,
+                   heatmap_legend_param = list(labels_gp = gpar(fontsize = 5),
+                                               title="Abudance",
+                                               title_gp=gpar(fontface ="bold",fontsize= 7), 
+                                               legend_height= unit(1, "cm"),
+                                               title_position="leftcenter-rot",
+                                               direction = "vertical",
+                                               legend_width = unit(.25, "cm"),
+                                               border='black'),
+                   
+                   border_gp = gpar(col = "black", lty = 1,lwd=.7),
+                   na_col="white",
+                   top_annotation = column_ha)
+
+# Customize legend
+amylase_heat <- draw(ht_list, 
+                     merge_legend = T,
+                     legend_grouping = "original",
+                     heatmap_legend_side = "right", 
+                     annotation_legend_side = "right")
+amylase_heat
+dev.off()
+```
+# Merge Plots
+## Load some plot objects
+```{r}
+p.scatter <- readRDS('objects/figure_objects/p_scatter.rds')
+ggsave('figures/figure2_scatter_plots.pdf',p.scatter, units="in", height = 1.19, width = 3.09, device = cairo_pdf)
+
+dys_max = max(permmeta$dysbiosis_score,na.rm = T)
+dysbiosis_distribution <- readRDS("objects/figure_objects/dysbiosis_distribution.rds")
+
+```
+
+```{r}
+amylase <- 
+  draw(ht_list, merge_legend = T,legend_grouping = "original",heatmap_legend_side = "right", annotation_legend_side = "right") %>% 
+  grid::grid.grabExpr(.) %>% 
+  as_ggplot()
+
+designA='
+#BEG
+ABEG
+ABEG
+ABEG
+ACEG
+ACFG
+ADFG
+ADFG
+ADHH
+ADHH
+ADHH
+'
+
+# Make top part of figures
+tmo<- mox_plots_Category[["DNA [PFAM]"]] +
+  dysbiosis_distribution +
+  mox_plots_Category[["DNA [Taxonomy]"]] +
+  mox_plots_Category[["AMP [Genus]"]] +
+  
+  mox_plots_Dysbiotic[["AMP [Genus]"]] + 
+  mox_plots_Dysbiotic[["DNA [Taxonomy]"]] +
+  mox_plots_Dysbiotic[["DNA [PFAM]"]] +
+  p.scatter +
+  plot_layout(design = designA,
+              axis_titles ="collect",
+              guides = "collect",
+  ) &
+  theme(legend.position="top",legend.title.position = "left") &
+  theme(plot.margin = margin(2,4,1,1))
+tmo
+ggsave("figures/dysbiosis/figure2_patchwork.pdf", units="in", width=5.83, height=4.42)
+
+
+
+# Make bottom part of figures
+e <- amylase + tmp1 +tmp2 + 
+  plot_layout(width =c(15,1,1)) &
+  theme(plot.margin = margin(2,4,1,1)) 
+e
+# Combine
+full <- tmo / e + plot_layout(heights = c(3,2))
+full
+ggsave("figures/dysbiosis/figure2_patchwork_e.pdf", units="in", width=5.93, 
+       height=6.42)
+```
+

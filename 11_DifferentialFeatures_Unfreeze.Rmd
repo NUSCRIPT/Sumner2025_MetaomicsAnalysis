@@ -1,0 +1,351 @@
+---
+title: "Differential Features"
+output:
+  html_document:
+    df_print: paged
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+source("src/common/load_metadata.r")
+source('src/common/load_features.r')
+source("src/common/nature_theme.r")
+source("src/common/graph_features.r")
+source('src/common/load_lists.r')
+source('src/common/get_clusters.r')
+source("src/common/feature_tables_functions.r")
+library(patchwork)
+library(tidyverse)
+library(ggpubr)
+```
+
+# Helper functions
+
+## Maaslin2 execution
+
+```{r}
+library(Maaslin2)
+set.seed(1234567)
+
+# Helper function to run maaslin in standardized way/avoid boilerplate
+# <my_fixed_effects> = character vector of metafeatures to model
+# <my_reference> = string in maaslin2 style for base references
+# Tests/Norm Method Cheat Sheet https://github.com/biobakery/biobakery/wiki/maaslin2 
+run_maaslin <- function(features_omic, meta_df, feature_col_name='feature', transform_val='NONE',
+                        my_fixed_effects, my_reference=NULL, dir_name='maaslin_out',
+                        my_variance=.01) {
+  
+  
+  system(paste0('mkdir -p differential_abundance/', dir_name))
+  
+  # Subset metadf so masslins happy
+  meta_omic <- meta_df %>%
+    filter(sample_name %in% colnames(features_omic)) %>% # Subset
+    column_to_rownames("sample_name")
+  
+  # Rename so maaslins happy and drop features not in metadata
+  features_omic <- features_omic %>% 
+    column_to_rownames(feature_col_name) %>%
+    select(rownames(meta_omic)) # select and order
+  
+  set.seed(200)
+  
+  maaslin_out <- Maaslin2(
+    features_omic, 
+    meta_omic, 
+    output = paste0('differential_abundance/', dir_name),
+    min_abundance = 0.0,
+    min_prevalence = 0.05,
+    min_variance = my_variance,
+    max_significance = 0.05,
+    normalization = 'NONE',
+    transform = 'NONE',
+    analysis_method = "LM", # LM for AST
+    fixed_effects = my_fixed_effects, 
+    # random_effects = c('script_id'),
+    reference = my_reference,
+    correction = 'BH',
+    plot_scatter = FALSE,
+    max_pngs = 10,
+    standardize = TRUE, 
+    cores = 10)
+  return(maaslin_out)
+}
+
+# Helper function that takes maaslin object and returns top 0-10 features (qval)
+get_top_features <- function(maaslin_out, my_category='Episode_etiology', num_features=10, min_qval=.05) {
+  maaslin_out$results %>%
+    filter(metadata %in% my_category,
+           qval < min_qval) %>%
+    arrange(qval) %>%
+    select(feature) %>%
+    unique() %>%
+    head(num_features) %>%
+    pluck("feature")
+}
+
+# Visualize top N features from results 
+
+# Helper function to iterate through maaslin results and plot for several metadata features
+# <my_features_list> = list of omics from load_features
+# <my_maaslin_list> = list of maaslin results w/ same names as in my_features_list
+# <maaslin_category> = string of a metadata feature used as fixed effect in maaslin
+# <a_group> = string of a metadat group to orient graph_features fuction 
+# <a_baseline> = string of a subset in group to be relative 
+plot_multiomics <- function(my_features_list, my_maaslin_list, 
+                            maaslin_category, a_group, a_baseline, 
+                            my_x_lab= bquote(''~log[2]~"(abund./median abund.)")){
+  multiomics_plots <- list()
+  for (i in seq_along(my_features_list)){
+    
+    pretty_i <- names(my_features_list)[[i]]
+    if (pretty_i == 'DNA [PFAM]') {num_feat = 18} else {num_feat = 10}
+    my_top_features <- get_top_features(my_maaslin_list[[pretty_i]], my_category = maaslin_category, min_qval=.05, num_features = num_feat)
+    my_top_features <- discard(my_top_features, str_detect(my_top_features,'k20107')) # fix for weird kegg
+    
+    features_plot <- graph_features(my_features_list[[i]], 
+                                    my_top_features, 
+                                    groups_df = meta_mas %>% 
+                                      filter(sample_name %in% colnames(my_features_list[[i]])) %>% drop_na(a_group), 
+                                    feature_col_name = "feature", 
+                                    group_col_name = a_group, 
+                                    baseline_group = a_baseline,
+                                    scale_val=5
+    ) + xlab(my_x_lab) #+ labs(subtitle = pretty_i)
+    multiomics_plots[[pretty_i]] <- features_plot #+ theme(axis.title.x = element_text(hjust=-.05))
+  }
+  return(multiomics_plots)
+}
+
+```
+
+# Metadata
+
+```{r, message=FALSE, warning=FALSE, results = FALSE}
+drop_samples()
+meta_mas <- permmeta %>% 
+  mutate(dysbiotic=factor(dysbiotic, levels=c('FALSE', 'TRUE')),
+         script_id = as.character(script_id),
+         Episode_is_cured = factor(Episode_is_cured, levels=c("Cured", "Indeterminate", "Not cured", "NPC")),
+  ) %>%  
+  mutate(hap_dysbiotic = case_when(is.na(Episode_category) | is.na(dysbiotic) ~ NA, 
+                                   Episode_category == "HAP" & dysbiotic == TRUE ~ "HAP_dysbiotic", 
+                                   Episode_category == "HAP" & dysbiotic == FALSE ~ "HAP_nondysbiotic",
+                                   .default = "Z_Other"),
+         cap_dysbiotic = case_when(is.na(Episode_category) | is.na(dysbiotic) ~ NA, 
+                                   Episode_category == "CAP" & dysbiotic == TRUE ~ "CAP_dysbiotic", 
+                                   Episode_category == "CAP" & dysbiotic == FALSE ~ "CAP_nondysbiotic",
+                                   .default = "Z_Other"),
+         vap_dysbiotic =  case_when(is.na(Episode_category) | is.na(dysbiotic) ~ NA, 
+                                    Episode_category == "VAP" & dysbiotic == TRUE ~ "VAP_dysbiotic", 
+                                    Episode_category == "VAP" & dysbiotic == FALSE ~ "VAP_nondysbiotic",
+                                    .default = "Z_Other"),
+         .after = 'sample_name') %>% 
+  mutate(hap_dysbiotic = factor(hap_dysbiotic),
+         cap_dysbiotic = factor(cap_dysbiotic),
+         vap_dysbiotic = factor(vap_dysbiotic)) %>% 
+  mutate(Episode_category = factor(Episode_category, levels=c('NPC', 'CAP', 'HAP', 'VAP'))
+  ) %>% 
+  mutate(Pneumotype_1 = factor(case_when(is.na(cluster_num_amplicon) ~ NA,
+                                         cluster_num_amplicon == "1" ~ "Pneumotype_1",
+                                         .default = "Other_Pneumotype")),
+         Pneumotype_2 = factor(case_when(is.na(cluster_num_amplicon) ~ NA,
+                                         cluster_num_amplicon == "2" ~ "Pneumotype_2",
+                                         .default = "Other_Pneumotype")),
+         Pneumotype_3 = factor(case_when(is.na(cluster_num_amplicon) ~ NA,
+                                         cluster_num_amplicon == "3" ~ "Pneumotype_3",
+                                         .default = "Other_Pneumotype")),
+         Pneumotype_4 = factor(case_when(is.na(cluster_num_amplicon) ~ NA,
+                                         cluster_num_amplicon == "4" ~ "Pneumotype_4",
+                                         .default = "Other_Pneumotype"))) %>% 
+  mutate(Pneumotype_1_Dysbiotic = case_when(is.na(cluster_num_amplicon) | is.na(dysbiotic) ~ NA,
+                                            Pneumotype_1 == "Pneumotype_1" & dysbiotic == TRUE ~ "Pneumotype_1_dysbiotic",
+                                            Pneumotype_1 == "Pneumotype_1" & dysbiotic == FALSE ~ "Pneumotype_1_nondysbiotic"
+  )) %>%
+  mutate(Pneumotype_1_Category = factor(case_when(is.na(cluster_num_amplicon) | is.na(Episode_category) ~ NA,
+                                                  Pneumotype_1 == "Pneumotype_1"  ~ paste(Pneumotype_1, Episode_category, sep="_"),
+                                                  .default = NA
+  ), 
+  levels=c("Pneumotype_1_NPC", 
+           "Pneumotype_1_HAP", 
+           "Pneumotype_1_VAP", 
+           "Pneumotype_1_CAP"))
+  ) %>% 
+  mutate(
+    Episode_etiology = factor(Episode_etiology, levels=c("NPC", "Bacterial", "Viral", "Bacterial/viral", "Culture-negative")),
+    Episode_category = factor(Episode_category, levels= c("NPC", "CAP", "HAP", "VAP")),
+    Episode_is_cured = factor(Episode_is_cured, levels= c("NPC", "Cured", "Not cured", "Indeterminate"))
+    
+  )
+
+print(meta_mas, n=100)
+saveRDS(meta_mas, file='objects/mox/MOX_02_MetaMas.rds')
+```
+
+# Analysis
+
+# Run Maaslin
+```{r}
+undo_log2p <- function(feature_list){
+  feature_list <- feature_list %>% 
+    tidy_features() %>% 
+    mutate(value = ((2^value)-1)/100) %>% 
+    wide_features()
+}
+mox_feature_list <- lapply(mox_feature_list, undo_log2p)
+mox_feature_list <- lapply(mox_feature_list, normalize_feature_table, normalize = F, transform="ast_no_tss")
+
+```
+
+
+## Univariate analysis
+
+```{r}
+# Category
+mfe = c('Episode_category')
+mr = 'Episode_category,NPC'
+mox_maaslin_list_Category <- list(
+  "AMP [Genus]"       = run_maaslin(mox_feature_list[["AMP [Genus]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_genus/Category'),
+  "AMP [ASV]"       = run_maaslin(mox_feature_list[["AMP [ASV]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_asv/Category'),
+  "DNA [Taxonomy]" = run_maaslin(mox_feature_list[["DNA [Taxonomy]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_taxonomy/Category'),
+  "RNA [Taxonomy MPA]" = run_maaslin(mox_feature_list[["RNA [Taxonomy MPA]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_mpa/Category'),
+  "RNA [Taxonomy BKN]" = run_maaslin(mox_feature_list[["RNA [Taxonomy BKN]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_bkn/Category'),
+  "DNA [Viral]" = run_maaslin(mox_feature_list[["DNA [Viral]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_viral/Category'),
+  "RNA [PFAM]" = run_maaslin(mox_feature_list[["RNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='rna_pfam/Category'),
+  "DNA [PFAM]"       = run_maaslin(mox_feature_list[["DNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='dna_pfam/Category')
+)
+# mox_plots_Category <- plot_multiomics(my_features_list = mox_feature_list[names(mox_maaslin_list)], my_maaslin_list = mox_maaslin_list_Category, maaslin_category = mfe,  a_group = str_split(mr, ',', simplify = T)[[1]], a_baseline = str_split(mr, ',', simplify = T)[[2]])
+mox_maaslin_list_Category[["AMP [Genus]"]]$results
+
+# Etiology
+mfe = c('Episode_etiology')
+mr = 'Episode_etiology,NPC'
+mox_maaslin_list_Etiology <- list(
+  "AMP [Genus]"       = run_maaslin(mox_feature_list[["AMP [Genus]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_genus/Etiology'),
+  "AMP [ASV]"       = run_maaslin(mox_feature_list[["AMP [ASV]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_asv/Etiology'),
+  "DNA [Taxonomy]" = run_maaslin(mox_feature_list[["DNA [Taxonomy]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_taxonomy/Etiology '),
+  "RNA [Taxonomy MPA]" = run_maaslin(mox_feature_list[["RNA [Taxonomy MPA]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_mpa/Etiology'),
+  "RNA [Taxonomy BKN]" = run_maaslin(mox_feature_list[["RNA [Taxonomy BKN]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_bkn/Etiology'),
+  "DNA [Viral]" = run_maaslin(mox_feature_list[["DNA [Viral]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_viral/Etiology'),
+  "RNA [PFAM]" = run_maaslin(mox_feature_list[["RNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='rna_pfam/Etiology'),
+  "DNA [PFAM]"       = run_maaslin(mox_feature_list[["DNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='dna_pfam/Etiology')
+)
+
+
+# Success
+mfe = c('Episode_is_cured')
+mr = 'Episode_is_cured,NPC'
+mox_maaslin_list_Success <- list(
+  "AMP [Genus]"       = run_maaslin(mox_feature_list[["AMP [Genus]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_genus/Success'),
+  "AMP [ASV]"       = run_maaslin(mox_feature_list[["AMP [ASV]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_asv/Success'),
+  "DNA [Taxonomy]" = run_maaslin(mox_feature_list[["DNA [Taxonomy]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_taxonomy/Success'),
+  "RNA [Taxonomy MPA]" = run_maaslin(mox_feature_list[["RNA [Taxonomy MPA]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_mpa/Success'),
+  "RNA [Taxonomy BKN]" = run_maaslin(mox_feature_list[["RNA [Taxonomy BKN]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_bkn/Success'),
+  "DNA [Viral]" = run_maaslin(mox_feature_list[["DNA [Viral]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_viral/Success'),
+  "RNA [PFAM]" = run_maaslin(mox_feature_list[["RNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='rna_pfam/Success'),
+  "DNA [PFAM]"       = run_maaslin(mox_feature_list[["DNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='dna_pfam/Success')
+)
+# mox_plots_Success <- plot_multiomics(my_features_list = mox_feature_list[names(mox_maaslin_list)], my_maaslin_list = mox_maaslin_list_Success, maaslin_category = mfe,  a_group = str_split(mr, ',', simplify = T)[[1]], a_baseline = str_split(mr, ',', simplify = T)[[2]])
+
+
+# Culture
+mfe = c('bacteria_positive')
+mr = 'bacteria_positive,Negative'
+mox_maaslin_list_Culture <- list(
+  "AMP [Genus]"       = run_maaslin(mox_feature_list[["AMP [Genus]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_genus/Culture'),
+  "AMP [ASV]"       = run_maaslin(mox_feature_list[["AMP [ASV]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_asv/Culture'),
+  "DNA [Taxonomy]" = run_maaslin(mox_feature_list[["DNA [Taxonomy]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_taxonomy/Culture'),
+  "RNA [Taxonomy MPA]" = run_maaslin(mox_feature_list[["RNA [Taxonomy MPA]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_mpa/Culture'),
+  "RNA [Taxonomy BKN]" = run_maaslin(mox_feature_list[["RNA [Taxonomy BKN]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_bkn/Culture'),
+  "DNA [Viral]" = run_maaslin(mox_feature_list[["DNA [Viral]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_viral/Culture'),
+  "RNA [PFAM]" = run_maaslin(mox_feature_list[["RNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='rna_pfam/Culture'),
+  "DNA [PFAM]"       = run_maaslin(mox_feature_list[["DNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='dna_pfam/Culture')
+)
+# mox_plots_Culture <- plot_multiomics(my_features_list = mox_feature_list[names(mox_maaslin_list)], my_maaslin_list = mox_maaslin_list_Culture, maaslin_category = mfe,  a_group = str_split(mr, ',', simplify = T)[[1]], a_baseline = str_split(mr, ',', simplify = T)[[2]])
+
+
+# Dysbiotic
+mfe = c('dysbiotic')
+mr = 'dysbiotic,FALSE'
+mox_maaslin_list_Dysbiotic <- list(
+  "AMP [Genus]"       = run_maaslin(mox_feature_list[["AMP [Genus]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_genus/Dysbiotic'),
+  "AMP [ASV]"       = run_maaslin(mox_feature_list[["AMP [ASV]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_asv/Dysbiotic'),
+  "DNA [Taxonomy]" = run_maaslin(mox_feature_list[["DNA [Taxonomy]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_taxonomy/Dysbiotic'),
+  "RNA [Taxonomy MPA]" = run_maaslin(mox_feature_list[["RNA [Taxonomy MPA]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_mpa/Dysbiotic'),
+  "RNA [Taxonomy BKN]" = run_maaslin(mox_feature_list[["RNA [Taxonomy BKN]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_bkn/Dysbiotic'),
+  "DNA [Viral]" = run_maaslin(mox_feature_list[["DNA [Viral]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_viral/Dysbiotic'),
+  "RNA [PFAM]" = run_maaslin(mox_feature_list[["RNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='rna_pfam/Dysbiotic'),
+  "DNA [PFAM]"       = run_maaslin(mox_feature_list[["DNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='dna_pfam/Dysbiotic')
+)
+# mox_plots_Dysbiotic <- plot_multiomics(my_features_list = mox_feature_list[names(mox_maaslin_list)], my_maaslin_list = mox_maaslin_list_Dysbiotic, maaslin_category = mfe,  a_group = str_split(mr, ',', simplify = T)[[1]], a_baseline = str_split(mr, ',', simplify = T)[[2]])
+
+
+# Amylase
+mfe = c('amylase_bf_log')
+mr = 'amylase_bf_log'
+mox_maaslin_list_Amylase <- list(
+  "AMP [Genus]"       = run_maaslin(mox_feature_list[["AMP [Genus]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_genus/Amylase'),
+  "AMP [ASV]"       = run_maaslin(mox_feature_list[["AMP [ASV]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_asv/Amylase'),
+  "DNA [Taxonomy]" = run_maaslin(mox_feature_list[["DNA [Taxonomy]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_taxonomy/Amylase'),
+  "RNA [Taxonomy MPA]" = run_maaslin(mox_feature_list[["RNA [Taxonomy MPA]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_mpa/Amylase'),
+  "RNA [Taxonomy BKN]" = run_maaslin(mox_feature_list[["RNA [Taxonomy BKN]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_bkn/Amylase'),
+  "DNA [Viral]" = run_maaslin(mox_feature_list[["DNA [Viral]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_viral/Amylase'),
+  "RNA [PFAM]" = run_maaslin(mox_feature_list[["RNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='rna_pfam/Amylase'),
+  "DNA [PFAM]"       = run_maaslin(mox_feature_list[["DNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='dna_pfam/Amylase')
+)
+
+
+# QPCR
+mfe = c('Quantity.Mean.Log')
+mr = 'Quantity.Mean.Log'
+mox_maaslin_list_QPCR <- list(
+  "AMP [Genus]"       = run_maaslin(mox_feature_list[["AMP [Genus]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_genus/QPCR'),
+  "AMP [ASV]"       = run_maaslin(mox_feature_list[["AMP [ASV]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_asv/QPCR'),
+  "DNA [Taxonomy]" = run_maaslin(mox_feature_list[["DNA [Taxonomy]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_taxonomy/QPCR'),
+  "RNA [Taxonomy MPA]" = run_maaslin(mox_feature_list[["RNA [Taxonomy MPA]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_mpa/QPCR'),
+  "RNA [Taxonomy BKN]" = run_maaslin(mox_feature_list[["RNA [Taxonomy BKN]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_bkn/QPCR'),
+  "DNA [Viral]" = run_maaslin(mox_feature_list[["DNA [Viral]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_viral/QPCR'),
+  "RNA [PFAM]" = run_maaslin(mox_feature_list[["RNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='rna_pfam/QPCR'),
+  "DNA [PFAM]"       = run_maaslin(mox_feature_list[["DNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='dna_pfam/QPCR')
+)
+
+
+
+# Clusters
+mfe = c('cluster_num_amplicon')
+mr = 'cluster_num_amplicon,1'
+mox_maaslin_list_Clusters <- list(
+  "AMP [Genus]"       = run_maaslin(mox_feature_list[["AMP [Genus]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_genus/Clusters'),
+  "AMP [ASV]"       = run_maaslin(mox_feature_list[["AMP [ASV]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='amplicon_asv/Clusters'),
+  "DNA [Taxonomy]" = run_maaslin(mox_feature_list[["DNA [Taxonomy]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_taxonomy/Clusters'),
+  "RNA [Taxonomy MPA]" = run_maaslin(mox_feature_list[["RNA [Taxonomy MPA]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_mpa/Clusters'),
+  "RNA [Taxonomy BKN]" = run_maaslin(mox_feature_list[["RNA [Taxonomy BKN]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='rna_taxonomy_bkn/Clusters'),
+  "DNA [Viral]" = run_maaslin(mox_feature_list[["DNA [Viral]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr, dir_name='dna_viral/Clusters'),
+  "RNA [PFAM]" = run_maaslin(mox_feature_list[["RNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='rna_pfam/Clusters'),
+  "DNA [PFAM]"       = run_maaslin(mox_feature_list[["DNA [PFAM]"]], meta_mas, my_fixed_effects = mfe, my_reference = mr,my_variance=.001, dir_name='dna_pfam/Clusters')
+)
+
+mox_maaslin_list_Amylase[["AMP [Genus]"]]$results %>% 
+  as_tibble() %>% 
+  filter(qval < 0.05) 
+# group_by(metadata) %>% 
+# summarise(n = n())
+
+mox_maaslin_list = list(
+  
+  "Category" = mox_maaslin_list_Category,
+  "Etiology" = mox_maaslin_list_Etiology,
+  "Success" = mox_maaslin_list_Success,
+  "Culture" = mox_maaslin_list_Culture,
+  "Dysbiotic" = mox_maaslin_list_Dysbiotic,
+  "Amylase" = mox_maaslin_list_Amylase,
+  "QPCR" = mox_maaslin_list_QPCR,
+  "DysbiosisScore" = mox_maaslin_list_DysbiosisScore,
+  "Clusters" = mox_maaslin_list_Clusters
+)
+
+saveRDS(mox_maaslin_list, file='objects/mox/MOX_01_maaslin_results.rds')
+# mox_maaslin_list <- readRDS('objects/mox/MOX_01_maaslin_results.rds')
+
+```

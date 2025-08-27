@@ -1,0 +1,277 @@
+---
+title: "Dysbioses"
+output:
+  html_document:
+    df_print: paged
+editor_options: 
+  chunk_output_type: console
+---
+```{r,warning=FALSE, results='hide'}
+source('src/common/load_features.r') 
+source("src/common/load_metadata.r")
+source("src/common/get_distances.r")
+source("src/common/nature_theme.r")
+source("src/common/graph_features.r")
+library(tidyverse)
+library(ggridges)
+library(ggh4x)
+```
+
+# Frequency statistics
+```{r}
+# Frequency statistics
+distribs <- permmeta %>% 
+  drop_na(dysbiotic) %>%
+  group_by(Episode_category) %>%
+  summarise(dysbiotic_n = sum(dysbiotic),
+            non_dysbiotic_n = sum(!dysbiotic),
+            dysbiotic_freq = (dysbiotic_n / n()),
+            non_dysbiotic_freq = (non_dysbiotic_n / n()))
+distribs
+```
+# Plot major categorical features for exploration (density plots)
+```{r, warning=FALSE}
+
+pdf("figures/dysbiosis/mdnp_distribution_overlapping.pdf", height=3.24, width = 2)
+print(plot_distribution(permmeta, "dysbiosis_score", "Episode_category", "Non-pneumonia distance", "Disease state", ridge_plot=F)+geom_vline(xintercept=dysbiosis_cutoff))
+dev.off()
+
+```
+
+# Plot figures 
+(nicer plots, relationships between key qpcr, amylase, Episode_category, dysbiosis and other key metadata)
+
+## Dysbiosis distribution across disease state
+```{r}
+
+dys_max = max(permmeta$dysbiosis_score,na.rm = T)
+# Distribution stats
+dysbiosis_distribution <- permmeta %>% drop_na(Episode_category, dysbiosis_score) %>% 
+  ggplot(., aes(x=dysbiosis_score,
+                y=Episode_category, 
+                fill=Episode_category, 
+                colour=Episode_category)) +
+  geom_density_ridges(aes(height=stat(density)), 
+                      scale = 1.5, 
+                      linewidth=.3, 
+                      alpha=1, 
+                      stat='density', 
+                      color='black') +
+  theme_nature() + 
+  labs(y="Density", x="MDNP score",fill='Type') +
+  theme(aspect.ratio = 1) +
+  annotate('rect', 
+           xmin=dysbiosis_cutoff, 
+           xmax=dys_max, 
+           ymin=0, 
+           ymax=6, 
+           fill='#999999', 
+           alpha=.2, 
+           color=NA)+
+  geom_vline(xintercept = dysbiosis_cutoff, 
+             linewidth=.3, 
+             linetype='dashed') +
+  scale_fill_manual(values=mox_color_lists[['Episode_category']]) +
+  geom_text(data=distribs, 
+            aes(y=Episode_category, 
+                label=paste0("n = ", dysbiotic_n, ' (', round(dysbiotic_freq*100,0), '%)'), 
+                x=dys_max), 
+            color='black', 
+            size=4/.pt, 
+            hjust=1,
+            vjust=1, 
+            parse = F)+
+  coord_cartesian(clip = "on", 
+                  expand=F)
+  
+dysbiosis_distribution 
+saveRDS(dysbiosis_distribution, "objects/figure_objects/dysbiosis_distribution.rds")
+ggsave("figures/dysbiosis/dysbiosis_density.pdf", dysbiosis_distribution, width = 2.01, height = 1.4, units = "in")
+
+```
+
+
+
+## Dysbiosis distribution across disease state
+
+```{r, warning=FALSE}
+# Correlations dyb. x sofa
+dysbiosis_sofa <- permmeta %>% drop_na(Episode_is_cured) %>% 
+  ggplot(., aes(x=SOFA_score, 
+                y=dysbiosis_score, 
+                color=Episode_is_cured, 
+                fill=Episode_is_cured)) +
+  geom_point(size=.2) +
+  geom_smooth(size=.4, alpha=.3, method = "lm") +
+  theme_nature() +
+  labs(x="Sequential organ failure assessment score", y="MDNP score") + 
+  facet_wrap2(~Episode_is_cured, axes = 'all') +
+  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']]) + 
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_is_cured']], 
+                                           darken, amount = .2))) +
+  stat_cor(aes(label = paste(..r.label.., ..p.label.., sep = "~`,`~")), method='spearman', cor.coef.name='rho', 
+           p.accuracy = 0.001,
+           size=4/.pt, 
+           label.y = .85)  
+
+dysbiosis_sofa
+
+ggsave('figures/dysbiosis/dysbiosis_sofa.pdf',dysbiosis_sofa,  width=2.66, height=2.35, units='in')
+```
+
+```{r}
+# Correlations dyb. x los
+dysbiosis_partial_pressure <- ggplot(permmeta, aes(x=dysbiosis_score, y=PaO2FIO2_ratio)) +
+  geom_smooth(size=.4, alpha=.3, method = "lm", se=T, color='black') +
+  geom_point(size=.5) +
+  theme_nature() +
+  labs(y="PaO2FIO2 ratio", x="MDNP score")
+dysbiosis_partial_pressure
+
+ggsave("figures/dysbiosis/dysbiosis_partialpressure.pdf", units="in", height=2.50, width=1.16)
+dysbiosis_los <- ggplot(permmeta, aes(x=dysbiosis_score, y=hospital_los_days)) +
+  geom_smooth(size=.5, alpha=.3, method = "lm",color='black') +
+  geom_point() +
+  theme_nature() +
+  labs(x="MDNP score",y="Hospital LoS") 
+
+dysbiosis_los
+ggsave("figures/dysbiosis/dysbiosis_hlos.pdf", units="in", height=2.50, width=1.16)
+
+```
+
+```{r}
+# permmeta %>% group_by(dysbiotic) %>% summarize(n())#filter(dysbiosis_score<.8, log10(Quantity.Mean) >3)
+# Correlations dyb. x qpcr
+dysbiosis_qpcr <- permmeta %>% arrange(Episode_category) %>% 
+  drop_na(Quantity.Mean.Log,dysbiosis_score) %>% 
+  ggplot(aes(x=Quantity.Mean.Log, y=dysbiosis_score)) +
+  geom_point(size=1.5, alpha=.8, color="black", fill="grey", shape=21) +
+  geom_smooth(size=.4, alpha=.3, method = "lm", se=T, color='black') +
+  theme_nature() +
+  labs(x=bquote(log[10]~"16S gene copies"~mu*L^-1*""),y="MDNP score") +
+  theme(aspect.ratio = 1) +
+  stat_cor(aes(label = paste(..r.label.., ..p.label.., sep = "~`,`~")), method='spearman', cor.coef.name='rho', p.accuracy = 0.001, size=5/.pt)  
+dysbiosis_qpcr
+ggsave("figures/dysbiosis/dysbiosis_qpcr.pdf", dysbiosis_qpcr, width = 2, height = 1.5, units = "in")
+
+#log[10]~"(16S gene copies"~mu*L^-1*")"
+
+# Correlations dyb. x qpcr
+dysbiosis_amylase <- permmeta %>% arrange(Episode_category) %>%
+  drop_na(amylase_bf_log,dysbiosis_score) %>% 
+  ggplot(aes(x=amylase_bf_log, y=dysbiosis_score)) +
+  geom_point(size=1.5, alpha=.8, color="black", fill="grey", shape=21) +
+  geom_smooth(size=.4, alpha=.3, method = "lm", se=T, color='black') +
+  theme_nature() +
+  labs(x=bquote(log[10]~"amylase U"), y="MDNP score") +
+  theme(aspect.ratio = 1) + 
+  stat_cor(aes(label = paste(..r.label.., ..p.label.., sep = "~`,`~")), method='spearman', cor.coef.name='rho', p.accuracy = 0.001, size=5/.pt)  
+  # scale_fill_manual(values=mox_color_lists[['Episode_category']]) + 
+  # scale_colour_manual(values=mox_color_lists[['Episode_category']])
+dysbiosis_amylase
+
+ggsave("figures/dysbiosis/dysbiosis_amylase.pdf", dysbiosis_amylase, width = 2, height = 1.5, units = "in")
+
+
+# Correlations qpcr x amylase
+qpcr_amylase <-  permmeta %>% arrange(desc(Episode_category)) %>% 
+  drop_na(amylase_bf_log,Quantity.Mean.Log ) %>% 
+  ggplot(aes(x=amylase_bf_log, y=Quantity.Mean.Log)) +
+  geom_point(size=1.5, alpha=.8, color="black", fill="grey", shape=21) +
+  geom_smooth(size=.4, alpha=.3, method = "lm", se=T, color='black') +
+  theme_nature() +
+  labs(x=bquote(log[10]~"amylase U"), y=bquote(log[10]~"16S gene cp"~mu*L^-1*""), x="MDNP score") +
+  theme(aspect.ratio = 1) + 
+  stat_cor(aes(label = paste(..r.label.., ..p.label.., sep = "~`,`~")), method='spearman', cor.coef.name='rho', p.accuracy = 0.001, size=5/.pt)  
+  # scale_fill_manual(values=mox_color_lists[['Episode_category']]) + 
+  # scale_colour_manual(values=mox_color_lists[['Episode_category']])
+qpcr_amylase
+ggsave("figures/dysbiosis/qpcr_amylase.pdf", qpcr_amylase, width = 2, height = 1.5, units = "in")
+
+
+
+qpcr_amylase_cultivable <- permmeta %>% arrange(bacteria_positive) %>% 
+  ggplot(aes(x=amylase_bf_log, y=Quantity.Mean.Log)) +
+  geom_point(aes(fill=bacteria_positive), size=1.5, shape=21,color="black", alpha=.8) +
+  geom_smooth(size=.4, alpha=.3, method = "lm", se=T, color='black') +
+  theme_nature() +
+  labs(
+    x=bquote(log[10]~"(amylase U)"), 
+    y=bquote(log[10]~"16S gene cp"~mu*L^-1*"")) +
+  theme(aspect.ratio = 1) +
+  scale_color_manual(values=mox_color_lists[['bacteria_positive']]) +
+  scale_fill_manual(values=mox_color_lists[['bacteria_positive']]) 
+
+qpcr_amylase_cultivable
+ggsave("figures/dysbiosis/qpcr_amylase_cultivable.pdf", qpcr_amylase_cultivable, width = 2, height = 2, units = "in")
+
+# Correlations qpcr x amylase
+qpcr_hemoglobin <- permmeta %>% 
+  drop_na(Quantity.Mean.Log,Hemoglobin) %>% 
+  ggplot(.,  aes(x= Quantity.Mean.Log, y=Hemoglobin)) +
+  geom_point(size=1.5, alpha=.8, color="black", fill="grey", shape=21) +
+  geom_smooth(size=.4, alpha=.3, method = "lm", se=T, color='black') +
+  theme_nature() +
+  labs(x=bquote(log[10]~"16S gene cp"~mu*L^-1*""), y="Hemoglobin") +
+  theme(aspect.ratio = 1) 
+qpcr_hemoglobin
+ggsave("figures/dysbiosis/qpcr_hemoglobin.pdf", qpcr_amylase, width = 2, height = 1.5, units = "in")
+
+```
+
+```{r}
+library(patchwork)
+design1 = '
+ABC
+'
+p.scatter <-dysbiosis_qpcr +
+  dysbiosis_amylase + 
+  qpcr_amylase +
+  plot_layout(guides='collect',design = design1, axis_titles = 'collect_x') & 
+  theme(legend.position = 'none')
+
+p.scatter
+
+saveRDS(p.scatter, 'objects/figure_objects/p_scatter.rds')
+ggsave('figures/dysbiosis/figure2_scatter_plots.pdf',p.scatter, units="in", height = 1.67, width = 4.42, device = cairo_pdf)
+```
+
+```{r}
+search_features(mox_feature_list[["DNA [PFAM]"]], "amylase")
+search_features(mox_feature_list[["RNA [PFAM]"]], "amylase")
+
+amylase_mgx <- mox_feature_list[["DNA [PFAM]"]] %>% 
+  filter(str_detect(feature, 'K01176')) %>% #PF00128 #K01176
+  pivot_longer(2:last_col()) %>% left_join(permmeta, by = c('name' = 'sample_name')) %>%
+    group_by(name) %>% 
+    mutate(value = sum(value)) %>% 
+    ungroup() %>% 
+  mutate(value_detect = case_when(value >0 ~ 'Detected', value == 0 ~ 'Undetected'))
+
+amylase_mgx %>%   
+  ggplot(aes(x=value, y=amylase_bf_log)) +
+  geom_point(aes(fill=baseline_or_bal), size=1,linewidth=.2, shape=21) +
+  geom_smooth(size=.4, alpha=.3, method = "lm", se=T, color='black') +
+  #geom_smooth(aes(color=Episode_category), size=.5, alpha=.3, method = "lm", se=F) +
+  stat_cor() +
+  theme_nature() +
+  labs(x="Log2 PF00128: Alpha amylase, catalytic domain abundance", y="Log10 Amylase" )
+
+amylase_mgx %>% 
+  ggplot(aes(x=value_detect, y=amylase_bf_log)) + # %>% plot_violin(.) %>% plot_statistics(.)
+  geom_boxplot(fill="grey") +
+  geom_point(position='jitter',
+             aes(fill=Episode_category), 
+             size=1,
+             linewidth=.2, 
+             shape=21) +
+  #geom_smooth(aes(color=Episode_category), size=.5, alpha=.3, method = "lm", se=F) +
+  theme_nature() +
+  stat_compare_means()
+
+ggsave("figures/dysbiosis//amylase_gene_detected_mgx_vs_amylase_bal.pdf", units="in", width=2.95, height=1.95)
+amylase_mgx %>% dplyr::select(value_detect, value, amylase_bf_log) %>% summary(
+  
+)
+```

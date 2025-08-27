@@ -1,0 +1,200 @@
+---
+title: "Host Transcriptomics"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r}
+library(tidyverse)
+library(vegan)
+```
+```{r}
+read_htx <- function(file_path){
+  print(file_path)
+  raw_htx <-  read_tsv(file_path,
+                       skip = 1) %>%
+    rename_with(~ str_replace(., "-BAL-", "BAL"), everything()) %>%
+    dplyr::select(!Gene_Symbol) %>%
+    column_to_rownames("Symbol")
+  return(raw_htx)
+}
+
+make_map <- function(file_path){
+  print(file_path)
+  raw_map <-  read_tsv(file_path,
+                       skip = 0) %>%
+    filter(Symbol=="Symbol") %>% 
+    dplyr::select(3:last_col()) %>%
+    pivot_longer(1:last_col()) %>%
+    mutate(value = str_replace(value, "-BAL-", "BAL")) %>% 
+    return(raw_map)
+}
+```
+
+# FPKM 
+```{r}
+htx_base_path <- "/path/to/my_data/htx/fpkm/"
+
+htx_files <- list.files(path = htx_base_path, full.names=TRUE,recursive=FALSE, pattern = ".txt") %>%
+  str_subset(., ".xlsx", negate=TRUE) # Remove metadata file
+
+htx_data_list<- lapply(htx_files, read_htx)
+
+htx_raw <- do.call("cbind", htx_data_list) %>% 
+  subset(., select=which(!duplicated(rev(names(.))))) 
+
+htx_map_list <- lapply(htx_files, make_map)
+htx_map <- do.call("rbind", htx_map_list)
+
+head(htx_raw)
+```
+
+```{r}
+
+# Get and remove protein coding genes
+get_protein_genes <- function(htx_raw){
+  library("biomaRt")
+  yourListofGenes<- rownames(htx_raw)
+  mart <- useMart(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+  myResult <- getBM(values = yourListofGenes, attributes = c("ensembl_gene_id", "gene_biotype", "hgnc_symbol"), mart=mart)
+  protein_genes <- myResult %>% filter(gene_biotype == 'protein_coding') 
+  # For converting later
+  ensembl2symbol <<- protein_genes %>% 
+    dplyr::rename(feature = "ensembl_gene_id") %>% 
+    mutate(hgnc_symbol = paste0(feature, ": ", hgnc_symbol)) %>% 
+    distinct(feature, hgnc_symbol)
+  # Get protein genes
+  protein_genes <- protein_genes %>% pluck('ensembl_gene_id') 
+  return(protein_genes)
+}
+
+protein_genes <- get_protein_genes(htx_raw) 
+
+detach("package:biomaRt", unload = TRUE)
+
+htx_raw <- htx_raw %>% 
+  rownames_to_column('feature') %>% 
+  filter(feature %in% protein_genes) %>% 
+  left_join(ensembl2symbol) %>% 
+  mutate(feature = hgnc_symbol) %>% 
+  dplyr::select(!hgnc_symbol) %>% 
+  column_to_rownames('feature')
+dim(htx_raw)
+head(htx_raw)
+
+```
+
+## Normalize
+```{r}
+# filter by prevalence and mean abundance to denoise kraken2 data
+htx_clean <- htx_raw %>%
+  rownames_to_column("Symbol") %>%
+  select(contains("Symbol")|contains("BAL")) %>%
+  select(!contains(c("CON", 
+                     "hURNA", 
+                     "REDACTEDINTERNALIDENTIFIER1", # an Internal BAL ID
+                     "REDACTEDINTERNALIDENTIFIER2")) # an Internal BAL ID
+         ) %>% # drop samples with few genes reads(<800), reference conntrols, and non-SCRIPT samples
+  rowwise() %>%
+  mutate(
+    prev = sum(c_across(2:last_col()) > 0), # detectable
+    .before = 2
+  ) %>%
+  ungroup()
+
+htx_clean <- htx_clean %>% 
+  filter(prev >= 10) %>% 
+  arrange(desc(prev)) %>%
+  select(!c(prev))
+
+# Note, in retrospect, going by sample-number-prevalence (rather than a fraction-of-samples-prevalence) leads to heterogeneity 
+# due to difference in yields across omics types. This was harmonized in later versions, most notably with the implementation of the feature_table functions 
+# as seeen in notebook 01 MGX/MTX.
+# For HTX, this is corrected in a downstream script by filtering similar to as done in the rest of the omics data
+# This approach - that is sample-number-prevalence, is maybe/probably more correct for 
+# looking at feature-level variation within the dataset, as implemented for DESeq2 analysis on raw counts
+
+# On the topic, this and the amplicon notebook are some of the earliest sets of code from this project/my phd - it shows, but they're functional.
+# Learn from the other scripts.
+
+head(htx_clean)
+```
+
+```{r}
+
+# TSS Norm
+htx_comp <- htx_clean %>% 
+  pivot_longer(2:last_col()) %>%
+  group_by(name) %>%
+  mutate(total = sum(value), # Remove samples with no counts to denoise
+         value = value/sum(value)) %>% 
+  ungroup() %>% 
+  filter(total > 0) %>%
+  select(!total) %>%
+  pivot_wider(names_from = name, values_from = value)
+
+# AST Norm
+htx_ast <- htx_comp %>%
+  pivot_longer(2:last_col()) %>%
+  mutate(value = asin(sqrt(value))) %>%
+  pivot_wider(names_from = name, values_from = value)
+
+ord_mat_htx_fpkm_ast <- htx_ast %>% 
+  column_to_rownames("Symbol") %>%
+  select(!last_col()) %>%
+  as.matrix()
+
+# beta-diversity measure
+beta_htx_fpkm_ast <- vegdist(t(ord_mat_htx_fpkm_ast), 'bray')
+```
+## Beta Diversity - Sanity Check
+```{r}
+ord_mat_htx_fpkm <- htx_clean %>% 
+  column_to_rownames("Symbol") %>%
+  select(!last_col()) %>%
+  as.matrix()
+
+# beta-diversity measure
+beta_htx_fpkm <- vegdist(t(ord_mat_htx_fpkm), 'bray')
+
+# projection
+htx_pcoa <- cmdscale(beta_htx_fpkm, k = 4, eig = TRUE)
+
+# cleanup
+htx_ord <- as.data.frame(htx_pcoa$points)
+names(htx_ord) <- c('pcoa1', 'pcoa2', 'pcoa3', 'pcoa4') ## rename coordinates
+
+
+# Percent explained variation
+eig <- eigenvals(htx_pcoa)
+eig.percent <- 100*head(eig/sum(eig))
+eig.percent
+eig.1 <- paste("PCo1 (", as.character(round(eig.percent[1], digits = 1)), "%)", sep = "")
+eig.2 <-paste("PCo2 (", as.character(round(eig.percent[2], digits = 1)), "%)", sep = "")
+
+
+## plot PCoA (FIGURE 1A)
+ggplot(data = htx_ord, aes(x = pcoa1, y = pcoa2, fill="red")) +
+  geom_point(size = 2, stroke = 1, shape=21) +
+  theme_bw() +
+  xlab(eig.1) +
+  ylab(eig.2) +
+  theme(axis.text = element_text(size=15, color = "black"),
+        axis.title = element_text(size=16, color = "black"),
+        legend.text = element_text(size=15, color = "black"),
+        legend.title = element_text(size=15, color = "black"), 
+        aspect.ratio = 1) +
+  scale_fill_brewer(guide="legend", palette="Set1") +
+  guides(fill=guide_legend(override.aes=list(shape=21))) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) 
+
+```
+# Save
+```{r}
+saveRDS(htx_map, "objects/htx/HTX_00_mapping.rds")
+saveRDS(beta_htx_fpkm, "./objects/htx/HTX_01_Bray.rds") # Not Used 
+saveRDS(htx_comp, './objects/htx/HTX_01A_COMPFeatureTable.rds')
+saveRDS(htx_ast, './objects/htx/HTX_01B_ASTFeatureTable.rds') # Not Used
+```

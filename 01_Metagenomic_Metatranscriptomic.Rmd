@@ -1,0 +1,452 @@
+---
+title: "MGX MTX"
+output: html_document
+date: "`r Sys.Date()`"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+source("src/common/humann_processing_functions.r")
+source("src/common/metaphlan_processing_functions.r")
+source("src/common/bracken_processing_functions.r")
+source("src/common/feature_tables_functions.r")
+source("src/common/ordination_functions.r")
+source("src/common/nature_theme.r")
+source("src/common/decontam_functions.r")
+source("src/common/krakenuniq_processing_functions.r")
+source("config.r")
+
+##########################################################################################################
+```
+
+# Metagenomic
+```{r}
+## Load DNA Extraction Concentrations
+# dna_conc_md <- readxl::read_excel(FILE_mgx_dna_meta, sheet=1) %>% 
+#   select(tc_pt_study_id, `DNA_concentration_TapeStation (ng/ul)`) %>% 
+#   rename(sample_name = tc_pt_study_id,
+#          dna_concentration = `DNA_concentration_TapeStation (ng/ul)`) %>% 
+#   mutate(sample_name = str_replace_all(sample_name, "-", ""))
+
+# Load 16S qPCR Quantities
+qpcr <- readRDS('src/common/QPCR_02_CleamqPCRTable.rds') %>% 
+  mutate(bal.id = str_replace(bal.id, "-BAL-", "BAL"),
+         Quantity.Mean = case_when((Quantity.Mean < 10 & Quantity.Mean > 0) ~ 5, # LoQ adjustment
+                                   T ~ Quantity.Mean )
+  ) %>% 
+  dplyr::rename(sample_name ="bal.id") %>%
+  select(sample_name, Quantity.Mean, Ct.Mean) %>% 
+  unique() %>% 
+  drop_na(Quantity.Mean) %>% 
+  mutate(Quantity.Mean.Log = log10(Quantity.Mean))
+
+# Get samples with minimum read count
+passing_samples_mgx <- read_tsv(FILE_mgx_reads) %>% 
+  select(Sample, contains("final")) %>% 
+  rowwise(Sample) %>% 
+  summarise(final = sum(c_across(where(is.numeric)))) %>% 
+  filter(final > 2e4) %>%  
+  mutate(Sample = str_replace(Sample, "PT_", "")) %>%
+  pluck("Sample")
+print(passing_samples_mgx)
+
+
+# Read in MPA
+mpa_mgx <- read_metaphlan(FILE_mgx_mpa_all)
+
+# Get putative contaminants
+mpa_mgx %>% 
+  get_bal_samples %>% 
+  select(feature, any_of(qpcr$sample_name)) %>% 
+  decontaminate_feature_tables(., qpcr, "Quantity.Mean.Log", my_threshold =  0.1) 
+print(contaminant_vector)
+
+# Process data
+mpa_mgx <- mpa_mgx %>% 
+  filter(!feature %in% contaminant_vector) %>%
+  select(feature, any_of(passing_samples_mgx)) %>%
+  drop_zero_sum_samples() %>% 
+  normalize_feature_table(.,normalize=T,transform="none") %>% 
+  get_most_prevalent(min_prevalence = 0.01) %>%
+  drop_unclassified() %>%
+  drop_zero_sum_samples()
+
+# Get basic sample information
+summary_table <- get_sample_types(mpa_mgx)
+
+# Visualize with everything
+mpa_mgx %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  get_distance("bray") %>% 
+  my_ordination_helper(my_meta = summary_table) %>% 
+  visualize_ordination("sample_type", "sample_type",3,.5)
+
+mpa_mgx %>% get_most_abundant_n(10)
+
+##########################################################################################################
+
+# Get samples with minimum read count
+passing_samples_mgx <- read_tsv(FILE_mgx_reads) %>%
+  select(Sample, contains("final")) %>%
+  rowwise(Sample) %>%
+  mutate(final = sum(c_across(where(is.numeric)))) %>%
+  ungroup() %>% 
+  filter(final > 7.5e4) %>%
+  mutate(Sample = str_replace(Sample, "PT_", "")) %>%
+  pluck("Sample")
+
+# Read in HMN
+hmn_mgx <- read_humann_basic(FILE_mgx_ko)
+
+# Get putative contaminants
+hmn_mgx %>% 
+  get_bal_samples %>% 
+  select(feature, any_of(qpcr$sample_name)) %>% 
+  decontaminate_feature_tables(., qpcr, "Quantity.Mean.Log", my_threshold =  0.1)
+print(contaminant_vector)
+
+# Process data
+hmn_mgx <- hmn_mgx %>%  
+  filter(!feature %in% contaminant_vector) %>%
+  select(feature, any_of(passing_samples_mgx)) %>%
+  get_bal_samples() %>% 
+  drop_unclassified() %>%
+  drop_zero_sum_samples() %>% 
+  normalize_feature_table(.,normalize=T,transform="none") %>% 
+  get_most_prevalent(min_prevalence = 0.01) %>% 
+  drop_zero_sum_samples() %>% 
+  drop_zero_sum_features()
+
+# Get basic sample information
+summary_table <- get_sample_types(hmn_mgx)
+
+# Visualize with everything
+hmn_mgx %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  get_distance(method="bray") %>% 
+  my_ordination_helper(my_meta = summary_table) %>% 
+  visualize_ordination("sample_type", "sample_type",3,.5)
+
+hmn_mgx %>% get_most_abundant_n(10)
+
+##########################################################################################################
+##########################################################################################################
+```
+
+# Metatranscriptomic
+```{r}
+
+# Limit to samples with min num clean reads and include hURNA standards to be able to visualize
+passing_samples_mtx <- read_tsv(FILE_mtx_reads) %>% 
+  filter(`final single` > 1e5 | str_detect(Sample, "hURNA")) %>%
+  mutate(Sample = str_replace(Sample, "PT_", "")) %>% 
+  pluck("Sample")
+print(passing_samples_mtx)
+
+
+# Drop non-SCRIPT samples
+mpa_mtx <- read_metaphlan(FILE_mtx_mpa_all) %>% 
+  get_sample_subset(pattern = "CON_BAL", negate = TRUE)
+
+
+# Get basic sample information
+control_summary <- get_sample_types(mpa_mtx) %>% 
+  mutate(controls = 
+           case_when(sample_type == "hURNA" ~ TRUE, 
+                     .default = F)
+  ) 
+
+# Identify putative contaminants
+mpa_mtx %>% 
+  decontaminate_feature_tables(.,
+                               md = control_summary, 
+                               md_column = "controls", 
+                               method="prevalence", 
+                               my_threshold =  0.1)
+print(contaminant_vector)
+
+# Process Data
+mpa_mtx <- mpa_mtx %>% 
+  filter(!feature %in% contaminant_vector) %>% # Drop Contaminants
+  select(feature, any_of(passing_samples_mtx)) %>%  # Drop Samples w/ Low Reads
+  drop_zero_sum_samples() %>% 
+  normalize_feature_table(.,normalize=T,
+                          transform="none") %>% 
+  get_bal_samples() %>% 
+  get_most_prevalent(min_prevalence = 0.01) %>% 
+  drop_unclassified() %>%
+  drop_zero_sum_samples()
+
+# Get basic sample information
+summary_table <- get_sample_types(mpa_mtx)
+
+# Visualize
+mpa_mtx %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  # get_sample_subset() %>%
+  get_distance("bray") %>% 
+  my_ordination_helper(my_meta = summary_table) %>% 
+  visualize_ordination("sample_type", "sample_type",3,.5)
+
+mpa_mtx %>% get_most_abundant_n(10)
+
+
+##########################################################################################################
+
+# Drop non-SCRIPT samples
+hmn_mtx <- read_humann_basic(FILE_mtx_pfam) %>% 
+  get_sample_subset(pattern = "CON_BAL", negate = TRUE)
+
+# Identify putative contaminants introduced duringn library prep
+hmn_mtx %>%  decontaminate_feature_tables(., 
+                                          md = control_summary, 
+                                          md_column = "controls", 
+                                          method="prevalence", 
+                                          my_threshold =  0.1) 
+print(contaminant_vector)
+
+
+# Process Data
+hmn_mtx <- hmn_mtx %>% 
+  filter(!feature %in% contaminant_vector) %>%
+  select(feature, any_of(passing_samples_mtx)) %>%
+  drop_zero_sum_samples() %>% 
+  drop_unclassified() %>%
+  normalize_feature_table(.,normalize=T,
+                          transform="none") %>% 
+  get_bal_samples() %>% 
+  get_most_prevalent(min_prevalence = 0.01) %>% 
+  drop_zero_sum_samples()
+
+# Get basic sample information
+summary_table <- get_sample_types(hmn_mtx)
+
+# Visualize
+hmn_mtx %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  # get_sample_subset() %>%
+  get_distance(method="bray") %>% 
+  my_ordination_helper(my_meta = summary_table) %>% 
+  visualize_ordination("sample_type", "sample_type",3,.5)
+
+hmn_mtx %>% get_most_abundant_n(20)
+
+#################################################################################################
+
+# # For processing bracken results - didn't make it into final analysis
+# bkn <- read_bracken(FILE_mtx_bracken, counts = F) %>%
+#   filter(str_detect(feature, "Plasmodium|Toxoplasma", negate = T)) %>% # Known Database Contaminants https://doi.org/10.1371/journal.pcbi.1006277
+#   get_sample_subset(pattern = "CON_BAL", negate = TRUE)
+# control_summary <- get_sample_types(bkn) %>% mutate(controls = case_when(sample_type == "hURNA" ~ TRUE, .default = F))
+# 
+# bkn %>% decontaminate_feature_tables(., control_summary, "controls", method="prevalence", my_threshold =  0.1)
+# print(contaminant_vector)
+# 
+# bkn <- bkn %>%
+#   filter(!feature %in% contaminant_vector) %>%
+#   select(feature, any_of(passing_samples_mtx)) %>%
+#   get_bal_samples() %>% 
+#   get_most_prevalent(min_prevalence = 0.01,min_abundance = 0.01) %>%
+#   
+#   normalize_feature_table(.,normalize=T,transform="none") %>%
+#   # get_most_prevalent(min_prevalence = 0.01,min_abundance = 0.01) %>%
+#   drop_features(c("Homo")) %>%
+#   drop_zero_sum_samples()
+# 
+# summary_table <- get_sample_types(bkn)
+# 
+# bkn %>% #filter(!feature %in% contaminants) %>%
+#   normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>%
+#   get_sample_subset() %>%
+#   get_distance(method="bray") %>%
+#   my_ordination_helper(my_meta = summary_table) %>%
+#   visualize_ordination("sample_type", "sample_type",3,.5)
+
+###########################
+
+# Processing KrakenUniq Results
+
+# Read in data, filtering kmers on a per-sample basis
+bkn <- read_kraken_uniq(DIRECTORY_mtx_kraken_uniq) %>% 
+  get_sample_subset(pattern = "CON_BAL", negate = TRUE)
+
+# Identify putative contaminants introduced duringn library prep
+bkn %>% decontaminate_feature_tables(., 
+                                     md = control_summary, 
+                                     md_column = "controls", 
+                                     method="prevalence", 
+                                     my_threshold =  0.1) 
+print(contaminant_vector)
+
+# Process Data
+bkn <- bkn %>%
+  filter(!feature %in% contaminant_vector) %>% 
+  select(feature, any_of(passing_samples_mtx)) %>%
+  drop_zero_sum_features() %>% 
+  filter(feature != "unclassified") %>%
+  get_most_prevalent(min_prevalence = .01, min_abundance = 0.001) %>%
+  normalize_feature_table(normalize = T, transform = "none") %>%  # Do TSS scaling
+  drop_zero_sum_features() %>%
+  drop_zero_sum_samples()
+dim(bkn)
+
+
+# Get basic informatin
+summary_table <- get_sample_types(bkn)
+
+# Visualize
+bkn %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  # get_bal_samples() %>%
+  get_distance(method="bray") %>%
+  my_ordination_helper(my_meta = summary_table) %>%
+  visualize_ordination("sample_type", "sample_type",3,.5)
+
+pheatmap::pheatmap(bkn %>% get_most_abundant_n(20) %>% column_to_rownames("feature"))
+
+##########################################################################################################
+
+# Pathway level data - did not make it into submissin
+path <- read_humann_basic(FILE_mgx_path) %>% 
+  drop_unclassified() %>% 
+  drop_zero_sum_samples() %>% 
+  normalize_feature_table(.,normalize=T,
+                          transform="none") %>%   
+  get_most_prevalent(min_prevalence = 0.1) %>% 
+  drop_zero_sum_samples()
+
+summary_table <- get_sample_types(path)
+
+path %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  get_sample_subset() %>%
+  get_distance(method="bray") %>% 
+  my_ordination_helper(my_meta = summary_table) %>% 
+  visualize_ordination("sample_type", "sample_type",3,.5)
+
+##########################################################################################################
+
+# Pathway level data - did not make it into submissin
+path_mtx <- read_humann_basic(FILE_mtx_path) %>% 
+  select(feature, any_of(passing_samples_mtx)) %>%
+  drop_unclassified() %>% 
+  drop_zero_sum_samples() %>% 
+  normalize_feature_table(.,normalize=T,
+                          transform="none") %>%   
+  get_most_prevalent(min_prevalence = 0.1) %>% 
+  drop_zero_sum_samples()
+
+summary_table <- get_sample_types(path)
+
+path_mtx %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  get_sample_subset() %>%
+  get_distance(method="bray") %>% 
+  my_ordination_helper(my_meta = summary_table) %>% 
+  visualize_ordination("sample_type", "sample_type",3,.5)
+get_most_abundant_n(path_mtx)
+##########################################################################################################
+```
+
+# Save things
+```{r}
+# Save things - There's some redundancy here, but its functional + good sanity check
+
+# AST MGX DISTANCES
+dist_mpa_mgx <- mpa_mgx %>% 
+  get_sample_subset(pattern = "BAL") %>% 
+  drop_zero_sum_features() %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  get_distance("bray")
+dist_hmn_mgx <- hmn_mgx %>% 
+  get_sample_subset(pattern = "BAL") %>% 
+  drop_zero_sum_features() %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  get_distance("bray")
+dist_path <- path %>% 
+  get_sample_subset(pattern = "BAL") %>% 
+  drop_zero_sum_features() %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  get_distance("bray")
+
+# AST MTX DISTANCES
+dist_mpa_mtx <- mpa_mtx %>% 
+  get_sample_subset(pattern = "BAL") %>% 
+  get_sample_subset(pattern = "CON_BAL", negate = TRUE) %>% 
+  get_sample_subset(pattern = "REP", negate = TRUE) %>% 
+  drop_zero_sum_features() %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  get_distance("bray")
+dist_hmn_mtx <- hmn_mtx %>% 
+  get_sample_subset(pattern = "BAL") %>% 
+  get_sample_subset(pattern = "CON_BAL", negate = TRUE) %>% 
+  get_sample_subset(pattern = "REP", negate = TRUE) %>% 
+  drop_zero_sum_features() %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  get_distance("bray")
+dist_bkn <- bkn %>% 
+  get_sample_subset(pattern = "BAL") %>% 
+  get_sample_subset(pattern = "CON_BAL", negate = TRUE) %>% 
+  get_sample_subset(pattern = "REP", negate = TRUE) %>% 
+  drop_zero_sum_features() %>% 
+  normalize_feature_table(.,normalize=F,transform="ast_no_tss") %>% 
+  get_distance("bray")
+
+saveRDS(dist_mpa_mgx, "objects/mgx/mgx_02_distance_Metaphlan.rds")
+saveRDS(dist_hmn_mgx, "objects/mgx/mgx_04_distance_HumannPFAM.rds")
+saveRDS(dist_path, "objects/mgx/mgx_06_distance_HumannPATH.rds")
+saveRDS(dist_mpa_mtx, "objects/mtx/mtx_02_distance_Metaphlan.rds")
+saveRDS(dist_hmn_mtx, "objects/mtx/mtx_04_distance_HumannPFAM.rds")
+saveRDS(dist_bkn, "objects/mtx/mtx_06_distance_Bracken.rds")
+
+
+saveRDS(mpa_mgx %>% 
+          get_sample_subset(pattern = "BAL") %>% 
+          drop_zero_sum_features() %>% 
+          normalize_feature_table(.,normalize=F,transform="log100"),
+        "objects/mgx/mgx_01_table_MetaphlanLog.rds")
+
+saveRDS(hmn_mgx %>% 
+          get_sample_subset(pattern = "BAL") %>% 
+          drop_zero_sum_features() %>% 
+          normalize_feature_table(.,normalize=F,transform="log100"),
+        "objects/mgx/mgx_03_table_HumannPFAMLog.rds")
+
+saveRDS(path %>% 
+          get_sample_subset(pattern = "BAL") %>% 
+          drop_zero_sum_features() %>% 
+          normalize_feature_table(.,normalize=F,transform="log100"),
+        "objects/mgx/mgx_05_table_HumannPATHLog.rds")
+
+saveRDS(mpa_mtx %>% 
+          get_sample_subset(pattern = "BAL") %>% 
+          get_sample_subset(pattern = "CON_BAL", negate = TRUE) %>% 
+          get_sample_subset(pattern = "REP", negate = TRUE) %>% 
+          drop_zero_sum_features() %>% 
+          normalize_feature_table(.,normalize=F,transform="log100"),
+        "objects/mtx/mtx_01_table_MetaphlanLog.rds")
+
+saveRDS(hmn_mtx %>% 
+          get_sample_subset(pattern = "BAL") %>% 
+          get_sample_subset(pattern = "CON_BAL", negate = TRUE) %>% 
+          get_sample_subset(pattern = "REP", negate = TRUE) %>% 
+          drop_zero_sum_features() %>% 
+          normalize_feature_table(.,normalize=F,transform="log100"),
+        "objects/mtx/mtx_03_table_HumannPFAMLog.rds")
+
+saveRDS(bkn %>% 
+          get_sample_subset(pattern = "BAL") %>% 
+          get_sample_subset(pattern = "CON_BAL", negate = TRUE) %>% 
+          get_sample_subset(pattern = "REP", negate = TRUE) %>% 
+          drop_zero_sum_features() %>% 
+          normalize_feature_table(.,normalize=F,transform="log100"),
+        "objects/mtx/mtx_05_table_BrackenLog.rds")
+
+
+```
+

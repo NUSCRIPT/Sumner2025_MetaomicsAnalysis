@@ -1,0 +1,157 @@
+---
+title: "Overview"
+output: html_document
+date: "`r Sys.Date()`"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+GOAL: Provide an overview of omics data via
+(1) Overlapping features (genera, genes) venn diagram
+(2) Richness corr between omics
+(3) Top abundant taxa heatmaps
+
+```{r}
+source('src/common/load_features.r')
+source("src/common/clean_feature_names.r")
+```
+# features venn diagram
+
+STEPS:
+(1) transform list of abundance tables to list of 1-column table w/ feature-name 
+(2) transform list of 1-col tables to 2-col table w/ feature name + omics
+(3) concatenate all lists to make tidy
+(4) clean names for desired inter-omic congruence (e.g., subset to genera for taxa)
+(4) ggupset
+
+```{r}
+names(mox_feature_list)
+
+# helper function for fist transform
+foo <- function(x = my_dt) { x %>% distinct(feature)}
+
+# (1)
+mox_features <- lapply(mox_feature_list, foo)
+
+# (2)
+mox_features <- lapply(names(mox_features), function(x) {
+    mox_features[[x]] %>% 
+        mutate(groupName = x)
+})
+
+# (3)
+df <- do.call("rbind", mox_features)
+
+# (4)
+df <- df %>% 
+    mutate(feature_clean = 
+               case_when(
+                   str_detect(groupName, "AMP") ~ fix_asv(feature),
+                   str_detect(groupName, "Taxonomy") ~ str_split_i(feature, " ", 1) %>% str_split_i(., "_", 1), # get genus, some caveats (assumes one space, fails for sars cov 2),
+                   .default = feature
+               )
+           )
+
+# (5) - plot
+library(ggupset)
+
+# Lists for relevant omics groups
+taxa_omics <- c("AMP [Genus]", "AMP [ASV]", "DNA [Taxonomy]", "RNA [Taxonomy BKN]", "RNA [Taxonomy MPA]")
+gene_omics <- c("DNA [KO]", "DNA [Viral]", "RNA [KO]")
+other_omics <- c("RNA [Host Transcriptomics]", "DNA [Viral]")
+
+# Make nest for ggupset
+df_taxa <- df %>% 
+    distinct(groupName, feature_clean) %>% 
+    filter(groupName %in% taxa_omics) %>% 
+    group_by(feature_clean) %>%
+    summarize(groupName = list(groupName))
+
+
+taxa_upset <- df_taxa %>%
+    ggplot(aes(x=groupName)) + 
+        geom_bar() +
+        geom_text(stat='count', aes(label=after_stat(count)), vjust=1, size=3) +
+        scale_x_upset() +
+        # scale_y_continuous(breaks = NULL, lim = c(0, 1350), name = "") +
+        theme_bw()
+taxa_upset
+# Why some genera in amp asv but not amp genera? see here - probably result of difference in filtering + unknown genera level information
+df %>% 
+    distinct(groupName, feature_clean) %>% 
+    filter(groupName %in% c("AMP [Genus]", "AMP [ASV]")) %>% 
+    mutate(value = TRUE) %>%  
+    pivot_wider(names_from = groupName, values_from = value,values_fill = FALSE) %>% 
+    View()
+
+```
+# Richness correlations
+
+STEPS:
+(1) transform list of feature tables to list of 2-col richness tables (sample, richness)
+(2) transform list of 2-col tables to 3-col table w/ + omics
+(3) concatenate all lists to make tidy
+
+
+
+```{r}
+library(vegan)
+
+bar <- function(x) 
+    {x %>% 
+        tidy_features() %>% 
+        group_by(sample_name) %>% 
+        summarize(rich = vegan::specnumber(value))
+}
+
+# get just bacteria or euk
+mox_feature_list[["DNA [Taxonomy Bacteria]"]] <- mox_feature_list[["DNA [Taxonomy]"]] %>% 
+    filter(str_detect(feature, "EUK",negate=TRUE))
+mox_feature_list[["DNA [Taxonomy Eukaryotic]"]] <- mox_feature_list[["DNA [Taxonomy]"]] %>% 
+    filter(str_detect(feature, "EUK",negate=FALSE))
+#(1)
+spps <- lapply(mox_feature_list, bar)
+
+# (2)
+spps <- lapply(names(spps), function(x) {
+    spps[[x]] %>% 
+        mutate(groupName = x)
+})
+ 
+df <- do.call("rbind", spps)
+
+df_wide <- df %>% pivot_wider(names_from = groupName, values_from = rich)
+df_wide[['log10 DNA [Taxonomy]']] <- log10(df_wide[['DNA [Taxonomy]']]+1)
+
+plot_cor <- function(my_df, x, y){
+    p <- ggplot(my_df, aes(x=.data[[x]], y=.data[[y]])) +
+        geom_point(size = 1.5, alpha = 0.7, color = 'grey50') + 
+        geom_smooth(method = "lm", color='black') +
+        theme_nature() +
+        stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), method='pearson')
+    return(p)
+}
+p.amp.amp <- plot_cor(df_wide, "AMP [Genus]", "AMP [ASV]")
+p.amp.dna <- plot_cor(df_wide, "AMP [Genus]", "DNA [Taxonomy]")
+
+p.ampasv.dna <- plot_cor(df_wide, "AMP [ASV]", "DNA [Taxonomy]")
+p.dna.dna <- plot_cor(df_wide, "DNA [Taxonomy]", "DNA [KO]")
+p.ampasv.dnako <- plot_cor(df_wide, "AMP [ASV]", "DNA [KO]")
+
+p.ampasv.rnataxa <- plot_cor(df_wide, "AMP [ASV]", "RNA [Taxonomy BKN]")
+p.ampasv.rnataxampa <- plot_cor(df_wide, "AMP [ASV]", "RNA [Taxonomy MPA]")
+p.dna.rna <- plot_cor(df_wide, "DNA [Taxonomy]", "RNA [Taxonomy BKN]")
+
+p.rna.rna <- plot_cor(df_wide, "RNA [Taxonomy BKN]", "RNA [Taxonomy MPA]")
+
+
+# sanity plots:
+p.amp.dna_bacteria <- plot_cor(df_wide, "AMP [ASV]", "DNA [Taxonomy Bacteria]")
+p.amp.dna_eukaryotic <- plot_cor(df_wide, "AMP [Genus]", "DNA [Taxonomy Eukaryotic]")
+p.ampasv.dnalog <- plot_cor(df_wide, "AMP [ASV]", "log10 DNA [Taxonomy]")
+
+
+```

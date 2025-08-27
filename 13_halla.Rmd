@@ -1,0 +1,227 @@
+---
+title: "13_Halla"
+output: html_document
+date: "2023-11-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+source('src/common/load_metadata.r')
+source('src/common/load_features.r')
+source('src/common/get_clusters.r')
+halla_path <- 'halla/'
+
+```
+
+```{r}
+
+halla <- function(features_list, a_features_name, b_features_name, 
+                  halla_path='halla/', fdr_alpha = '0.05', halla_mode = 'spearman'){
+
+  
+  # FUN:  Subset 2 features objects to have same samples
+  #       Takes named list of features and the names/element index of the 2 object to access
+  #       <feature_list> = list of dfs ; <a/b_feature_name> = string of name in list
+  #       Example: intersect_samples(mox_feature_list, 'Amplicon', 'DNA [Taxonomy]')
+  intersect_samples <- function(features_list, a_features_name, b_features_name){
+    
+    shared_samples <- intersect(colnames(features_list[[a_features_name]]),
+                                colnames(features_list[[b_features_name]]))
+    
+    shared_features <- list(
+      features_list[[a_features_name]] %>% select(shared_samples),
+      features_list[[b_features_name]] %>% select(shared_samples))
+    
+    names(shared_features) <- c(a_features_name, b_features_name)
+    
+    return(shared_features)
+  }
+  
+  
+  # FUN:  make file name pretty (helper)
+  get_filename <- function(my_name, other_name){
+    my_file_name <- paste0(halla_path,
+                           'files/', 
+                           janitor::make_clean_names(my_name), "-",
+                           janitor::make_clean_names(other_name), '.tsv')
+    return(my_file_name)
+  }
+  
+  
+  # FUN:  Programatically get subdirectory for results based on feature_df names (helper)
+  get_halla_out <- function(a_features_name, b_features_name, halla_path = halla_path){
+    halla_out_dir <- paste0(halla_path,
+                            'outputs/',
+                            janitor::make_clean_names(a_features_name), 
+                            '.',
+                            janitor::make_clean_names(b_features_name))
+    return(halla_out_dir)
+    
+  }
+  
+  # FUN:  Programatically get name for halla script
+  get_halla_script <- function(a_features_name, b_features_name, halla_path = halla_path){
+    halla_out_script <- paste0(halla_path,
+                            'scripts/run_halla_',
+                            janitor::make_clean_names(a_features_name), 
+                            '.',
+                            janitor::make_clean_names(b_features_name),
+                            '.sh')
+    return(halla_out_script)
+    
+  }
+  
+  
+  # FUN:  Save files as tsv for halla network association
+  #       Example: save_halla_features(halla_features, 'Amplicon', 'DNA [Taxonomy]')
+  save_halla_features <- function(features_list, a_features_name, b_features_name){
+    write_tsv(x = features_list[[a_features_name]], file = get_filename(a_features_name, b_features_name))
+    write_tsv(x = features_list[[b_features_name]], file = get_filename(b_features_name, a_features_name))
+  }
+  
+  
+  # FUN:  Programatically make halla command
+  get_halla_command <- function(features_list, a_features_name, b_features_name, 
+                                fdr_alpha = '0.05', halla_mode = 'spearman'){
+    a_file <- get_filename(a_features_name, b_features_name)
+    b_file <- get_filename(b_features_name, a_features_name)
+    ab_outdir <- get_halla_out(a_features_name, b_features_name, halla_path)
+    
+    my_command <- paste0('halla -x ',     a_file,
+                         ' -y ',          b_file,
+                         ' --out_dir ',    ab_outdir,
+                         ' --fdr_alpha ', fdr_alpha,
+                         ' -m ',          halla_mode,
+                         ' --num_threads ',     '10',
+                         ' --fnr_thresh 0.3') # up from .2 based on group by associations evidence without it +/- adjacent
+    return(my_command)
+  }
+  
+  
+  # Execute
+  halla_features <- intersect_samples(features_list, a_features_name, b_features_name)
+  save_halla_features(halla_features, a_features_name, b_features_name)
+  
+  # Get halla command
+  if (a_features_name=='Metadata' | b_features_name == 'Metadata') {
+    halla_mode <- 'nmi' # changed to nmi - normalized mutual information
+  } else {
+    halla_mode <- 'spearman'
+  }
+  halla_command <- get_halla_command(halla_features, a_features_name, b_features_name, halla_mode = halla_mode)
+  
+  # Get script name
+  halla_script <- get_halla_script(a_features_name, b_features_name, halla_path)
+  system(paste0('cp src/common/sbatch_header.sh ', halla_script))
+
+  print(halla_command)
+  add_halla_command <- paste0('echo ', "'", "\n", halla_command, "'", ' >> ', halla_script)
+  system(add_halla_command)
+  system(paste0('echo ', "'", "\nsbatch ", halla_script, "'", ' >> ', 'halla_sbatches.sh'))
+
+  print(add_halla_command)
+  return(halla_features)
+}
+
+
+run_halla_list <- function(features_list, halla_path = "halla/"){
+
+  # Iterate through features_list
+  for (seq_a in seq_along(features_list)) {
+    for (seq_b in seq_along(features_list)) {
+      
+      # Get names for plotting 
+      a_features_name <- names(features_list)[seq_a]
+      b_features_name <- names(features_list)[seq_b]
+      
+      # Only run halla on (1) different matrixes (2) one time
+      if (seq_a <= seq_b) {
+        
+        print(paste('Comparing: ', a_features_name, b_features_name))
+        
+        # Execute mantel test between the two dist. matrixes
+        halla_result <- halla(features_list, a_features_name, b_features_name, 
+                              halla_path = halla_path) # Allows multiple attempts for baseline, residualized, etc
+      }
+    }
+  }
+}
+
+# Get most filled metadata
+md_w_g100_entries<- permmeta %>% 
+  pivot_longer(2:last_col(), values_drop_na = T, values_transform = as.character) %>%
+  group_by(name) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n)) %>% 
+  filter(!name %in% c("pt_study_id","accession_numbers_id",
+                      "Ct.Mean","Quantity.Mean","amylase_bf", "pna_category",
+                      "script_id","Patient_id/ICU_stay/ICU_day", "has_bal", "dysbiotic"
+                      ), n>100) %>% 
+  pluck('name')
+
+selected_metadata <- c( 
+"Episode_category",  
+"Episode_etiology",
+"Episode_is_cured", 
+"Binary_outcome",
+"Discharge_disposition", 
+"amylase_bf_log",
+"FiO2",
+"PEEP",
+"Plateau_Pressure",
+"Lung_Compliance",
+"antibiotics_flag",
+"hospital_los_days",
+"Smoking_status",
+"Race",
+"Age",
+"bacteria_positive", 
+"fungal_positive",
+"neutrophils_bodyfluid",
+"Hemoglobin",
+"Quantity.Mean.Log",
+"dysbiosis_score",
+"cluster_num_amplicon") 
+
+
+tmp <- list()
+for (i in seq_along(mox_feature_list)){
+  ft_name <- names(mox_feature_list)
+  print(ft_name[i])
+  
+  # Alternative prevalence filter for culture
+  if (ft_name[i] %in% c("CFU [Culture]")){
+    prevalence = .01
+  } else {
+    prevalence = .1
+  }
+
+   tmp[[ft_name[i]]] =  mox_feature_list[[i]] %>% 
+    get_bal_samples() %>% 
+    get_most_prevalent(min_prevalence = prevalence) %>% 
+    drop_zero_sum_samples()
+}
+# prevalence filtered list
+halla_feature_list <- tmp
+halla_feature_list[["Metadata"]] <-  permmeta %>% 
+     select(sample_name, md_w_g100_entries) %>%
+     column_to_rownames('sample_name') %>% 
+     t() %>% 
+     as_tibble(rownames='feature')
+
+source("src/common/load_antibiotic_table.r")
+abx_feature <- get_abx_table() %>% get_most_prevalent(.1)
+halla_feature_list[["ABX [Medication"]] = abx_feature
+
+system('mkdir halla')
+system('mkdir halla/scripts')
+system('mkdir halla/files')
+system('mkdir halla/outputs')
+
+run_halla_list(halla_feature_list)
+
+```

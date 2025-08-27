@@ -1,0 +1,88 @@
+---
+title: "QPCR"
+output:
+  html_document:
+    df_print: paged
+---
+
+The purpose of this notebook is to take the different results files
+generated on qPCR thermocycler/software, and shove them into a tidy-like format
+for us in the main paper.
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(ggridges)
+source("/path/to/nature_theme.R")
+```
+
+```{r}
+clean_qpcr <- function(raw_qpcr){
+  clean <- raw_qpcr %>%
+    select(Sample.Name, Quantity.Mean, Quantity, Quantity.SD, CT, Ct.Mean, Ct.SD, file_name) %>%
+    #filter(!is.na(Replicate)) %>% 
+      unique()
+  return(clean)
+}
+
+read_qpcr <- function(file_path){
+  print(file_path)
+  raw_qpcr <-  read_excel(file_path,
+              sheet="Results", 
+              skip = 43, 
+             .name_repair = "universal") %>%
+    mutate(file_name = basename(file_path))
+  clean <- clean_qpcr(raw_qpcr)
+  return(clean)
+}
+```
+
+```{r}
+# Some metadata used during exploritory analysis - dropped downstream (there were plots in here on local version)
+clusters <-readRDS("../01_data/amp_20230526/objects/clusters.rds") %>% 
+  mutate(name = str_replace(name, "-", "_"),
+         name = str_replace(name, "PT", "")) %>%
+  mutate(cluster_num = factor(cluster_num))
+
+meta <- read_tsv("/path/to/project/ClinicalMetadataAMP_DeID.txt") %>%
+  mutate(sample.id = paste0("PT", sample.id)) %>%
+  rename(patient.id.num = "patient.id") %>%
+  mutate(pt_category2 = pt_category) %>%
+  mutate(pt_category2 = ifelse(stringr::str_detect(pt_category2, "VAP"), "HAP", pt_category2)) %>%
+  mutate(
+    binned_outcome = case_when(
+      stringr::str_detect(discharge_disposition_name,"Expired|Hospice|SNF|LTAC|AMA") ~ "Negative",
+      stringr::str_detect(discharge_disposition_name,"Home|AIR") ~ "Positive",
+      T ~ discharge_disposition_name)) %>%
+  mutate(sample.id = str_replace(sample.id, "PT","")) %>%
+  left_join(clusters, by=c("sample.id" = "name"))
+```
+
+```{r}
+
+qpcr_base_path <- "~/Documents/Projects/balf_amplicon_microbiome/01_data/qPCR"
+
+
+qpcr_files <- list.files(path = qpcr_base_path, full.names=TRUE,recursive=FALSE, pattern = ".xls") %>%
+  str_subset(., ".xlsx", negate=TRUE) # Remove metadata file
+
+qpcr_data_list<- lapply(qpcr_files, read_qpcr)
+
+qpcr_raw <- do.call("rbind", qpcr_data_list)
+qpcr_data_list[[1]]
+```
+
+```{r}
+qpcr_clean <- qpcr_raw %>% 
+  filter(!Sample.Name %in% c("Sample 1", "NTC")) %>% # Empty wells 
+  drop_na(Quantity)%>%
+  left_join(meta, c("Sample.Name" = "sample.id"))
+```
+
+
+
+```{r}
+saveRDS(qpcr_raw, "QPCR_01_RawqPCRTable.rds")
+saveRDS(qpcr_clean, "QPCR_02_CleamqPCRTable.rds")
+```
+

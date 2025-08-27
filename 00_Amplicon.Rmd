@@ -1,0 +1,620 @@
+---
+title: "00_Amplicon"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 5, fig.height = 3)
+```
+
+# Getting Started 
+
+## Load Packages
+```{r}
+cran_packages <- c("reshape2", "ggplot2", "vegan", "stringr", "gridExtra", "ape", "RColorBrewer", "dplyr", "knitr","cowplot","openxlsx")
+bioc_packages <- c("phyloseq","decontam")
+sapply(c(cran_packages, bioc_packages), require, character.only = TRUE)
+
+library(tidyverse)
+library(qiime2R)
+library(ggpubr)
+library(microViz)
+library(microbiome)
+library(ggsci)
+library(patchwork)
+library(metagenomeSeq)
+library(viridis)
+library(usedist)
+library(decontam)
+```
+
+
+## Helper Functions
+
+```{r}
+
+# Decontaminate phyloseq object + basic qc
+decontaminate_phyloseq <- function(ps4decontam){
+  # Get blanks
+  ps4decontam <- subset_samples(ps4decontam, sample.type != "zymo-control")
+  print(ps4decontam)
+  sample_data(ps4decontam)$is.neg <- sample_data(ps4decontam)$Sample_or_Control == "Control-Sample"
+  
+  # Get dataframe of contaminants
+  contamdf.prev05 <- isContaminant(
+    ps4decontam, 
+    method="prevalence",
+    neg="is.neg", 
+    threshold=0.5
+  )
+  print(table(contamdf.prev05$contaminant))
+  contaminants <<- filter(contamdf.prev05, contaminant == TRUE) %>% rownames()
+  print(contaminants)
+  
+  # Prune contaminant taxa at the threshold .05 (> prevalence in control=contaminant)
+  final_biom <- prune_taxa(!contamdf.prev05$contaminant, ps4decontam)
+  print(ntaxa(final_biom) / ntaxa(ps4decontam))
+  
+  
+  return(final_biom)
+}
+
+
+# Plot Library Size 
+plot_library_size <- function(ps){
+  df <- as.data.frame(sample_data(ps)) # Put sample_data into a ggplot-friendly data.frame
+  df$LibrarySize <- sample_sums(ps)
+  df <- df[order(df$LibrarySize),]
+  df$Index <- seq(nrow(df))
+  
+  p1 <- ggplot(data=df, aes(x=Index, y=LibrarySize, color=sample.type)) + 
+    geom_point(alpha=0.7, size=2)  + 
+    scale_color_brewer(palette = "Dark2") + 
+    theme_pubr()
+  
+  return(p1)
+}
+
+
+tidy_phyloseq <- function(final_biom){
+  library(tidyverse)
+  library(dplyr)
+  
+  final_biom <- tax_glom(final_biom, taxrank = "Genus")
+  final_biom_melt <- psmelt(final_biom)
+  
+  grouped_final<- final_biom_melt %>% 
+    as_tibble() %>% filter(sample.type == "bal-sample") %>% 
+    select(Sample, OTU, Abundance, Genus) %>% 
+    group_by(Sample) %>%
+    mutate(SampleTotAbundance = sum(Abundance)) %>%
+    ungroup() %>% 
+    mutate(GeneraAbundancePerSample = Abundance/SampleTotAbundance) %>% 
+    group_by(Genus) %>%
+    mutate(meanGeneraAbundancePerSample = mean(GeneraAbundancePerSample)) %>%
+    mutate(medGeneraAbundancePerSample = median(GeneraAbundancePerSample))
+  
+  top_genera <- grouped_final %>% filter(meanGeneraAbundancePerSample > 0.005) %>% 
+    select(Genus) %>% unique() %>% 
+    pluck(1)
+  top_genera
+  
+  # top_genera
+  other_taxa <- c("Kingdom", "Phylum", "Class","Order","Family")
+  
+  top_abund <- final_biom_melt %>% 
+    filter(Genus %in% top_genera) %>%
+    select(!c(Kingdom, Phylum, Class, Order, Family, OTU))
+  
+  low_abund <- final_biom_melt %>% filter(!Genus %in% top_genera) %>% mutate(Genus = "Z_RareTaxa")
+  
+  low_abund_melt <- low_abund %>% 
+    group_by(Sample) %>% 
+    mutate(AbundanceOtherTotal = sum(Abundance)) %>% 
+    ungroup() %>% 
+    select(!c(Kingdom, Phylum, Class, Order, Family, Abundance, OTU)) %>% unique() %>%
+    rename(Abundance = AbundanceOtherTotal) %>%
+    relocate(Sample)
+  
+  fmn_new <- rbind(top_abund, low_abund_melt)
+  
+}
+
+# Functions + colors to aid plotting
+get_separate_legend <- function(a_ggplot){
+  a_legend <- cowplot::get_legend(a_ggplot)
+  as_ggplot(a_legend)
+}
+
+c25 <- c(
+  "dodgerblue2", "#E31A1C", # red
+  "green4",
+  "#6A3D9A", # purple
+  "#FF7F00", # orange
+  "black", "gold1",
+  "skyblue2", "#FB9A99", # lt pink
+  "palegreen2",
+  "#CAB2D6", # lt purple
+  "#FDBF6F", # lt orange
+  "gray70", "khaki2",
+  "maroon", "orchid1", "deeppink1", "blue1", "steelblue4",
+  "darkturquoise", "green1", "yellow4", "yellow3",
+  "darkorange4", "brown", "grey38"
+)
+
+
+# Nature theme from MAASLIN2 source code
+# MaAsLin2 theme based on Nature journal requirements
+nature_theme <- function(x_axis_labels, y_label) {
+  # set default text format based on categorical and length
+  angle = NULL
+  hjust = NULL
+  size = 12
+  if (max(nchar(x_axis_labels), na.rm=TRUE) > 5) {
+    angle = 45
+    hjust = 1
+    size = 12
+  }
+  axis_title_size = 12
+  if (nchar(y_label) > 15) {
+    axis_title_size = 12
+  }
+  if (nchar(y_label) > 25) {
+    axis_title_size = 12
+  }
+  return ( ggplot2::theme_bw() + ggplot2::theme(
+    axis.text.x = ggplot2::element_text(size = size, vjust = 1, hjust = hjust, angle = angle, colour = "black"),
+    axis.text.y = ggplot2::element_text(size = axis_title_size, hjust = 1, colour = "black"),
+    axis.title = ggplot2::element_text(size = axis_title_size),
+    plot.title = ggplot2::element_text(size = size, hjust = 0.5),
+    legend.title = ggplot2::element_text(size = 20),
+    legend.text = ggplot2::element_text(size = 12),
+    axis.line = ggplot2::element_line(colour = 'black', size = .5),
+    axis.line.x = ggplot2::element_line(colour = 'black', size = .5),
+    axis.line.y = ggplot2::element_line(colour = 'black', size = .5),
+    panel.border = ggplot2::element_blank(),
+    panel.grid.major = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    axis.ticks = element_line(color="black"),
+    text = element_text(family = "Arial"))
+  )
+}
+```
+
+
+# Pre-Processing
+
+## Read in Metadata
+```{r}
+# Load in metadata and make minimal changes for joining
+meta <- read_tsv("~/ClinicalMetadataAMP_DeID.txt") %>%
+  mutate(sample.id = paste0("PT", sample.id), 
+         sample.id = str_replace(sample.id, "_", "-")) %>%
+  dplyr::rename(patient.id.num = "patient.id") %>%
+  mutate(pt_category2 = pt_category) %>%
+  mutate(pt_category2 = ifelse(stringr::str_detect(pt_category2, "VAP"), 
+                               "HAP", pt_category2)) %>%
+  mutate(binned_outcome = case_when(
+    stringr::str_detect(discharge_disposition_name,
+                        "Expired|Hospice|SNF|LTAC|AMA") ~ "Negative",
+    stringr::str_detect(discharge_disposition_name,
+                        "Home|AIR") ~ "Positive", 
+    T ~ discharge_disposition_name))
+```
+## Read in Qiime2 object
+```{r}
+# Load in qiime2 data
+ps <- qza_to_phyloseq(
+  features="/path/to/my_data/tmp_balf_amplicon/qiime2_out_trunc/table.qza",
+  tree="/path/to/my_data/tmp_balf_amplicon/qiime2_out_trunc/rooted-tree.qza",
+  "/path/to/my_data/tmp_balf_amplicon/qiime2_out_trunc/taxonomy.qza",
+  metadata = "/path/to/my_data/tmp_balf_amplicon/sample-metadata.tsv"
+)
+
+# Write Raw counts, taxa
+write_csv(otu_table(ps) %>% 
+            as.data.frame() %>% 
+            rownames_to_column(var="#NAME"), 
+          "tables/review/asv_table_raw.csv")
+
+write_csv(tax_table(ps) %>% 
+            as.data.frame() %>% 
+            rownames_to_column(var="#TAXONOMY"), 
+          "tables/review/tax_table_raw.csv")
+
+write_csv(sample_data(ps) %>% 
+            as_tibble(rownames = NA) %>% 
+            rownames_to_column(var="#NAME"), 
+          "tables/review/meta_table_raw.csv")
+
+# Remove faulty sample F9 Sham
+ps <- subset_samples(ps, patient.id1 != "Water-F9Sham")
+
+# Replace ASV hash with ASV number for easier interpretation + Add best Rank
+asv_list <- paste0("ASV", stringr::str_pad(seq(ntaxa(ps)),
+                                           stringr::str_length(ntaxa(ps)), 
+                                           pad = "0"))
+asv2seq <- cbind(c(asv_list, taxa_names(ps))) %>% as_data_frame()
+colnames(asv2seq) <- c("asv", "sequence")
+write_tsv(x = asv2seq, file = "tables/review/asv2sequence.tsv")
+
+taxa_names(ps) <- asv_list
+
+phyloseq::ntaxa(ps) 
+
+# Save renamed ASV taxa values
+tax_table(ps) %>% 
+  as.data.frame %>% 
+  rownames_to_column(var = "ASV") %>% 
+  write_tsv("tables/review/asv_raw_numbered.tsv")
+
+unfiltered_library_size <- enframe(sample_sums(ps)) %>% mutate(step = "Unfiltered")
+p_uf_lib <- plot_library_size(ps) + ylim(0,8e5)
+p_uf_lib
+ggsave("figures/amplicon_processing/library_size_unfiltered.pdf", p_uf_lib, units = "in", width = 5.81, height = 3.75)
+
+# Remove ASVs with a Kingdom assignment of Eukaryota or Unassigned 
+ps <- phyloseq::subset_taxa(ps, !Kingdom %in% c("Unassigned", "d__Eukaryota")) 
+ntaxa(ps) # (*largely* from unassigned)
+
+
+# Remove ASVs with a Kingdom assignment of Chloroplast or Mitochondria (extra precaution)
+ps <- phyloseq::subset_taxa(ps, !Genus %in% c("Chloroplast","Mitochondria"))  
+
+# Sanity check numbers
+ntaxa(ps) # number of taxa
+min(sort(taxa_sums(ps))) # min total sum for an asv
+sum(otu_table(ps) == 1) # num singletons
+sum(taxa_sums(ps) < 1)
+
+# Plot library size after initial filtering
+filtered_library_size <- enframe(sample_sums(ps)) %>% mutate(step = "FirstFilter")
+p_f_lib <- plot_library_size(ps) + ylim(0,8e5)
+p_f_lib 
+
+ggsave("figures/amplicon_processing/library_size_filtered.pdf", p_f_lib, units = "in", width = 5.81, height = 3.75)
+
+# Add highest ranked taxa to ASVs
+taxa_names(ps) <- tax_table(ps) %>% as.data.frame() %>%
+  select(!c(Species)) %>%
+  # filter(Kingdom != "Unassigned") %>%
+  mutate(across(.fns = ~replace(., . ==  "uncultured" , NA))) %>%
+  unite("BestRank", last_col():1, na.rm = TRUE, remove = TRUE, sep = "@") %>%
+  separate(BestRank, into=c("BestRank", NA), sep="@") %>%
+  rownames_to_column() %>%
+  mutate(BestRank = paste0(rowname, "_", BestRank)) %>%
+  select(BestRank) %>%
+  pluck(1)
+
+# Save 
+saveRDS(ps, file = "objects/amp/ps_raw_numbered.RDS") 
+```
+
+## Visualize Samples
+```{r}
+# Percent not NA 
+colSums(!is.na(tax_table(ps)))/nrow(tax_table(ps))
+
+sample_bar<- ps %>% 
+  tax_fix(unknowns = c("uncultured")) %>% 
+  comp_barplot(
+    tax_level = "unique", 
+    n_taxa = 15, 
+    tree_warn = FALSE, 
+    order_with_all_taxa = TRUE
+  ) + 
+  # theme_pubclean(5) +
+  rotate_x_text(90) + theme(axis.text.x = element_text(size = 4)) +
+  ggtitle("Metataxonomic Abundance-Not Normalized, BC Ordered")  
+# coord_flip()
+sample_bar
+```
+
+## Visualize Controls
+```{r}
+ps_controls <- ps %>% 
+  ps_filter(sample.type %in% c("ntc-control","zymo-control")) %>% 
+  tax_fix(unknowns = c("uncultured"))
+
+control_bar<- ps_controls %>% 
+  comp_barplot(
+    tax_level = "unique", 
+    n_taxa = 20, 
+    tree_warn = FALSE, 
+    order_with_all_taxa = TRUE,
+    # group_by = "sample.type"
+  ) + 
+  theme_pubclean(5) +
+  rotate_x_text(45) +
+  ggtitle("Metataxonomic Abundance-Not Normalized, BC Ordered") + 
+  coord_flip()
+control_bar
+
+saveRDS(ps_controls, file = "objects/amp/ps_controls.RDS") 
+
+```
+## Decontaminate 16S Data based on NTC controls
+```{r}
+# Add plate.number metadata to ps for batches decontam
+meta.plate <- meta %>% 
+  select(sample.id, plate.number)
+
+# Add NTC's and Zymo's batch information to metadata table
+sample.id <- c("Water-01", "Water-230118NFW", 
+               "Water-03", "Water-230202NFW", 
+               "Water-05", "Water-06",
+               "Z20230118-ZymoControl", "Z20230201-Zymo2point5ng177", "Z20230207A-Zymo2point5ng272") 
+
+plate.number <- c(1, 1, 
+                  3, 2, 
+                  2, 2,
+                  1, 2, 3)
+
+meta.controls <- cbind.data.frame(sample.id, plate.number)
+meta.plate <-rbind(meta.plate, meta.controls)
+
+# Join with plate metadata, also removes taxa w/ no counts
+ps_cleaner <- microViz::ps_join(x = ps,
+                                y = meta.plate,
+                                match_sample_names = "sample.id",
+                                keep_sample_name_col = FALSE)
+
+# Identify Contaminants
+ps_clean <- decontaminate_phyloseq(ps_cleaner)
+
+# Sanity checks
+print(ntaxa(ps_clean)) 
+saveRDS(ps_clean, file = "objects/amp/ps_raw_numbered_decontaminated.RDS") 
+
+# Plot library size after initial filtering
+decontam_library_size <- enframe(sample_sums(ps_clean)) %>% mutate(step = "Decontam")
+arrange(decontam_library_size, value)
+p_decontam_lib <- plot_library_size(ps_clean) + ylim(0,8e5)
+p_decontam_lib
+ggsave("figures/amplicon_processing/library_size_decontaminated.pdf", p_decontam_lib,  units = "in", width = 5.81, height = 3.75)
+
+
+ps_clean
+
+# Remove Controls
+ps_clean <- subset_samples(ps_clean, sample.type == "bal-sample")
+nsamples(ps_clean)
+ps_clean
+
+# Remove samples with < 5000 reads (none)
+ps_clean <- prune_samples(sample_sums(ps_clean) > 5000, ps_clean)
+nsamples(ps_clean)
+
+
+# Filter Zero Abundant Taxa - i.e., those only represented in the dropped Zymo controls
+ps_clean <- filter_taxa(ps_clean, function(x){sum(x > 0) > 0}, prune = TRUE)
+print(ntaxa(ps_clean)) 
+
+# Save
+saveRDS(ps_clean, file = "objects/amp/ps_raw_numbered_decontaminated_filtered.RDS")
+ps_clean
+
+plot_library_size(ps_clean)
+sample_sums(ps_clean) %>% sort() 
+```
+
+## Add in additional metadata
+```{r}
+
+# Join ps_clean with extra metadata
+ps_clean <- microViz::ps_join(x = ps_clean, 
+                              y = meta, 
+                              by = c("plate.number"),
+                              match_sample_names = "sample.id")
+# Make factors    
+sample_data(ps_clean)$plate.number <- as.factor(sample_data(ps_clean)$plate.number)
+sample_data(ps_clean)$success <- as.factor(sample_data(ps_clean)$success)
+
+sample_data(ps_clean) %>% colnames()
+```
+
+## Normalize by TSS, AST
+```{r}
+# ASV level minimum filtering
+ps.clean_filt <- filter_taxa(ps_clean, function(x){sum(x >= 2) >= 5}, prune = TRUE) # 2 & 5
+ps.clean_filt # Sanity Check
+
+# Plot final ASV level data
+asv_final_library_size <- enframe(sample_sums(ps.clean_filt)) %>% mutate(step = "ASVFinalFilter")
+p_asvfin_lib <- plot_library_size(ps.clean_filt) + ylim(0,8e5)
+p_asvfin_lib
+ggsave("figures/amplicon_processing/library_size_asvfinal.pdf", p_asvfin_lib, units = "in", width = 5.81, height = 3.75)
+
+# Compositional (TSS) Normalization
+ps.comp <- microbiome::transform(ps.clean_filt,  
+                                 transform = "compositional",
+                                 target="OTU") # adds to 1
+
+# AST Transformation
+ps.ast <- ps.comp
+otu_table(ps.ast) <- otu_table(ps.ast) %>% sqrt(.) %>% asin(.)
+
+
+# Genera level glom and minimum filtering
+ps.gen <- tax_glom(ps_clean, taxrank = "Genus",NArm=T)
+ps.gen # Sanity Check
+
+# Genus level filtering
+ps.gen <- filter_taxa(ps.gen, function(x){sum(x >= 2) >= 2}, prune = TRUE) # 2&2
+
+# Plot final Genus level data
+gen_final_library_size <- enframe(sample_sums(ps.gen)) %>% mutate(step = "GenusFinalFilter")
+p_genfin_lib <- plot_library_size(ps.gen) + ylim(0,8e5)
+p_genfin_lib
+ggsave("figures/amplicon_processing/library_size_genusfinal.pdf", p_genfin_lib, units = "in", width = 5.81, height = 3.75)
+
+ps.gen # Sanity Check
+
+# Compositional (TSS) Normalization
+ps.gen.comp <- microbiome::transform(ps.gen,  
+                                     transform = "compositional",
+                                     target="OTU")
+
+
+# AST Transformation
+ps.gen.ast <- ps.gen.comp
+otu_table(ps.gen.ast) <- otu_table(ps.gen.ast) %>% sqrt(.) %>% asin(.)
+sample_sums(ps.ast)
+
+
+# Higher Glom for Phyla
+ps.phy <- tax_glom(ps_clean, taxrank = "Phylum",NArm=FALSE)
+ps.phy.comp <- microbiome::transform(ps.phy,  
+                                     transform = "compositional",
+                                     target="Phylum")
+
+```
+```{r}
+# Bar plot on "Clean" Data
+sample_bar<- ps.gen.comp %>% 
+  tax_fix(unknowns = c("uncultured")) %>% 
+  comp_barplot(
+    tax_level = "Genus", 
+    n_taxa = 15, 
+    tree_warn = FALSE, 
+    order_with_all_taxa = TRUE
+  ) + 
+  theme_pubclean(10) +
+  rotate_x_text(90) + theme(axis.text.x = element_text(size = 4)) +
+  ggtitle("Metataxonomic Abundance-Not Normalized, BC Ordered")  
+
+sample_bar
+
+```
+# Generate filtering overview plots
+```{r}
+read_filter_counts <- rbind(
+  unfiltered_library_size,
+  filtered_library_size, 
+  decontam_library_size, 
+  asv_final_library_size, 
+  gen_final_library_size) 
+
+head(read_filter_counts)
+ggplot(read_filter_counts, aes(x=factor(step, levels=unique(step)), y=value)) +
+  geom_line(aes(group=name), alpha=.7) +
+  geom_point() +
+  theme_pubr(base_size = 8) +
+  labs(x="Processing Step", y="Reads")
+
+ggsave("figures/amplicon_processing/library_size_change_per_step.pdf", units = "in", width=4.83, height=2.28)
+read_filter_counts<- read_filter_counts %>% 
+  pivot_wider(names_from = step, values_from = value) %>% 
+  rename(sample_name = "name")
+
+write_tsv(x=read_filter_counts, file = "tables/review/read_count_filter_steps.tsv")
+```
+
+# Distance Matrixes
+```{r}
+# ASV
+dist.wunifrac <- as.matrix(distance(ps.ast, method="wunifrac", type="samples"))
+dist.unifrac <- as.matrix(distance(ps.ast, method="unifrac", type="samples"))
+dist.bray <- as.matrix(distance(ps.ast, method="bray", type="samples"))
+dist.jaccard <- as.matrix(distance(ps.ast, method="jaccard", type="samples"))
+
+# Genus
+dist.gen.wunifrac <- as.matrix(distance(ps.gen.ast, method="wunifrac", type="samples"))
+dist.gen.unifrac <- as.matrix(distance(ps.gen.ast, method="unifrac", type="samples"))
+dist.gen.bray <- as.matrix(distance(ps.gen.ast, method="bray", type="samples"))
+dist.gen.jaccard <- as.matrix(distance(ps.gen.ast, method="jaccard", type="samples"))
+```
+
+# Sanity check projections
+```{r}
+# Projection
+pcoa <- cmdscale(as.dist(dist.gen.wunifrac), k = 4, eig = TRUE)
+
+# cleanup
+ord <- as.data.frame(pcoa$points)
+names(ord) <- c('pcoa1', 'pcoa2', 'pcoa3', 'pcoa4') ## rename coordinates
+
+# Percent explained variation
+eig <- eigenvals(pcoa)
+eig.percent <- 100*head(eig/sum(eig))
+eig.percent
+eig.1 <- paste("PCo1 (", as.character(round(eig.percent[1], digits = 1)), "%)", sep = "")
+eig.2 <-paste("PCo2 (", as.character(round(eig.percent[2], digits = 1)), "%)", sep = "")
+
+## plot PCoA (FIGURE 1A)
+ggplot(data = ord, aes(x = pcoa1, y = pcoa2, fill="blue")) +
+  geom_point(size = 2, stroke = 1, shape=21) +
+  theme_bw() +
+  xlab(eig.1) +
+  ylab(eig.2) +
+  theme(axis.text = element_text(size=15, color = "black"),
+        axis.title = element_text(size=16, color = "black"),
+        legend.text = element_text(size=15, color = "black"),
+        legend.title = element_text(size=15, color = "black")) +
+  scale_fill_brewer(guide="legend", palette="Set1") +
+  #scale_shape_manual(values=c(21))+#, 22, 23, 24, 25, 26)) +
+  guides(fill=guide_legend(override.aes=list(shape=21))) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        aspect.ratio = 1) 
+ord %>% arrange(desc(pcoa2))
+```
+
+## Consensus Cluster Analysis
+```{r}
+library(ConsensusClusterPlus)
+
+report = ConsensusClusterPlus(as.dist(dist.gen.wunifrac), #, upper = FALSE, diag = FALSE
+                              maxK=10,
+                              reps=5000,
+                              pItem=.8,
+                              pFeature=1,
+                              clusterAlg="pam",
+                              seed=521)
+```
+
+# Save consensus at cluster w/ best evidence
+```{r}
+nc <- 4
+clusters <- enframe(report[[nc]]$consensusClass) %>% dplyr::rename(cluster_num = "value") %>%
+  mutate(cluster_num = factor(cluster_num))
+clust.col <- report[[nc]]$consensusTree
+```
+
+#Save Objects
+```{r}
+# Early QC Objects
+saveRDS(ps, "objects/amp/AMP_01_PhyloseqFiltered.rds")
+saveRDS(ps_controls, "objects/amp/AMP_02_PhyloseqControls.rds")
+saveRDS(ps_clean, "objects/amp/AMP_03_PhyloseqDecontaminated.rds")
+
+# Clean/Normed/Transformed Data Objects
+saveRDS(ps.comp, "objects/amp/AMP_04_PhyloseqTSS.rds")
+saveRDS(ps.ast, "objects/amp/AMP_04A_PhyloseqAST.rds")
+saveRDS(ps.gen, "objects/amp/AMP_07_PhyloseqGenus.rds")
+saveRDS(ps.gen.comp, "objects/amp/AMP_08_PhyloseqGenusTSS.rds")
+saveRDS(ps.gen.ast, "objects/amp/AMP_08A_PhyloseqGenusAST.rds")
+saveRDS(ps.phy, "objects/amp/AMP_11_PhyloseqPhylum.rds")
+saveRDS(ps.phy.comp, "objects/amp/AMP_12_PhylosePhylumTSS.rds")
+
+# Distance matrixes
+saveRDS(dist.wunifrac, "objects/amp/AMP_12_BetaWUnifrac.rds")
+saveRDS(dist.unifrac, "objects/amp/AMP_13_BetaUnifrac.rds")
+saveRDS(dist.bray, "objects/amp/AMP_14_BetaBrayCurtis.rds")
+saveRDS(dist.jaccard, "objects/amp/AMP_15_BetaJaccard.rds")
+saveRDS(dist.gen.wunifrac, "objects/amp/AMP_16_BetaGenusWUnifrac.rds")
+saveRDS(dist.gen.unifrac, "objects/amp/AMP_17_BetaGenusUnifrac.rds")
+saveRDS(dist.gen.bray, "objects/amp/AMP_17_BetaGenusBrayCurtis.rds")
+saveRDS(dist.gen.jaccard, "objects/amp/AMP_18_BetaGenusJaccard.rds")
+
+# Clusters
+saveRDS(report, "objects/amp/AMP_19_ConsensusClusterReport.rds")
+saveRDS(clusters, "objects/amp/AMP_20_ConsensusClusters.rds")
+
+getwd()
+```
+
+

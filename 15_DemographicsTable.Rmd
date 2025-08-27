@@ -1,0 +1,405 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(tidyverse)
+source('src/common/load_metadata.r')
+```
+# No. Patients
+```{r}
+
+permmeta %>% filter(!Patient_id %in% c(REDACTEDA,REDACTEDB,REDACTEDC)) %>%
+  select(script_id, Episode_category) %>%
+  unique() %>% 
+  group_by(Episode_category) %>%
+  summarize(n = n())
+```
+```{r}
+source('src/common/get_distances.r')
+labels(mox_dist_list)
+length(labels(mox_dist_list[['AMP [Genus]']])) 
+length(labels(mox_dist_list[["DNA [Taxonomy]"]])) 
+length(labels(mox_dist_list[["DNA [PFAM]"]])) 
+length(labels(mox_dist_list[[ "RNA [Taxonomy]"]])) 
+length(labels(mox_dist_list[["RNA [Host Transcriptomics]"]]))
+
+length(labels(mox_dist_list$Amplicon))
+
+```
+
+# Total Patients
+```{r}
+permmeta %>% 
+  select(script_id) %>%
+  unique() %>%
+  # group_by(Episode_category) %>%
+  summarize(n = n())
+
+# Total Cases
+permmeta %>% 
+  select(script_id, episode_rank) %>%
+  unique() %>% 
+  summarize(n = n())
+
+```
+
+
+# Disease subtype
+```{r}
+
+permmeta %>% 
+  select(script_id, Episode_category, episode_rank) %>%
+  unique() %>% 
+  group_by(Episode_category) %>%
+  summarize(n = n())
+```
+# Pathogen Etiology
+```{r}
+permmeta %>% 
+  select(script_id, Episode_etiology,episode_rank) %>%
+  unique() %>% 
+  group_by(Episode_etiology) %>%
+  summarize(n = n())
+```
+# Number longitudinal
+```{r}
+permmeta %>% 
+  select(script_id) %>%
+  group_by(script_id) %>%
+  summarize(n = n()) %>%
+  filter(n>1) 
+```
+# Culture
+```{r}
+permmeta %>% 
+  select(sample_name, bacteria_positive) %>%
+  unique() %>%
+  group_by(bacteria_positive) %>%
+  summarize(n = n())
+```
+
+```{r}
+permmeta %>%
+  select(hospital_los_days) %>%
+  drop_na() %>% 
+  summarise(across(where(is.numeric), .fns = 
+                     list(min = min,
+                          median = median,
+                          mean = mean,
+                          stdev = sd,
+                          q25 = ~quantile(., 0.25),
+                          q75 = ~quantile(., 0.75),
+                          max = max)))
+```
+
+# Patient repeat sampling summary
+```{r}
+source('src/common/load_metadata.r')
+source('src/common/nature_theme.r')
+library(patchwork)
+
+timeline <- stack(lapply(mox_dist_list, labels)) %>% 
+  filter(!str_detect(values, '_BAL_|BRL')) %>% unique() %>% #filter(duplicated(.)) #%>%
+  mutate(ind = case_when(str_detect(ind, 'AMP') ~ 'AMP ',
+                         str_detect(ind, 'DNA') ~ 'MGX ',
+                         str_detect(ind, 'RNA') ~ 'MTX ',
+                         str_detect(ind, 'Culture') ~ 'CUL'
+                         )) %>% unique() %>% 
+  filter(ind != 'CUL') %>% 
+  mutate(ind = as.character(ind), omic = ind) %>%
+  pivot_wider(names_from = ind, values_from = omic,  values_fill = '') %>%#, values_fill = c(' ' ))
+  unite('omics', 2:last_col(), sep= '') %>%
+  separate(values, into = c('patient_id', 'time'),sep='BAL', remove=FALSE) %>%
+  arrange(values) %>%
+  left_join(., permmeta, by = c('values'='sample_name')) %>%
+  mutate(time = as.integer(time), 
+         weeks = time/hospital_los_days) %>%
+  mutate(has_qpcr = case_when(!is.na(Quantity.Mean.Log) ~ 'QPCR ',
+                              .default = '')) %>%
+  mutate(omics=str_trim(omics, side = c("both")),
+         omics = factor(omics, levels=c("AMP", "MGX", "MTX", "AMP MGX", "AMP MTX", "MGX MTX", "AMP QPCR", "AMP MGX MTX", "AMP MGX QPCR", "AMP MTX QPCR", "AMP MGX MTX QPCR"))) %>% 
+  arrange(hospital_los_days)
+
+head(timeline)
+dim(timeline)
+timeline <- timeline %>% drop_na(script_id) # drop Zymo and Reps -- Need to ultimately fix in load_features and load distances scripts 
+# hospital_los_days
+library(ggh4x)
+p_bal_timeline <- ggplot(timeline, aes(y=reorder(patient_id, hospital_los_days))) +
+  geom_point(aes(x=sqrt(hospital_los_days), group='Hostpital LOS'),fill='grey', shape=23, size=1) +
+  geom_point(aes(x=sqrt(BAL_day_after_hos_admission), group = omics, fill = omics), shape=21, size = 1.5, stroke=.5) +
+  scale_fill_brewer(palette='Paired') +
+  theme_nature() + 
+  facet_wrap2(~Episode_category, ncol=4, scales = 'free_y', axes = 'all',) + 
+  theme(axis.text=element_text(size=5),
+         panel.grid.major.y = element_line(colour="grey", linetype="dashed"),
+         panel.border = element_rect(colour = "black", fill=NA, linewidth=.5)) +
+  labs(x='Square root of days', y= 'Patient ID')
+p_bal_timeline
+ggsave('figures/clinical_data/demographics_sampling.pdf', width=7.5, height=7, units='in')
+```
+
+```{r}
+venn_df <- timeline %>% 
+  group_by(omics,baseline_or_bal) %>%
+  summarize(count = n()) %>%
+  mutate(total=sum(count)) %>% 
+  ungroup()
+  
+head(venn_df)
+lim=125
+ggp_venn <- ggplot(venn_df, aes(x=reorder(omics, total), y=count)) +
+  geom_bar(aes(fill=baseline_or_bal), color='black', stat='identity',  width=.9, lwd=0.3) +
+  scale_y_continuous(position = "right", 
+                     # limits=c(0, lim), 
+                     expand=expansion(add=c(0,20))) +  
+  coord_flip() + 
+  theme_nature() +
+        scale_fill_manual(values=c(Baseline='#547b80', BAL="#67ada9"),
+                          breaks=c("Baseline", "BAL"),
+                          labels=c("Baseline", "Follow-up")) +
+        guides(fill=guide_legend(title="Sample")) +
+        stat_summary(fun.data = function(x){
+            return(c(y = sum(x) + 1, label = sum(x)))
+        }, 
+        geom = "text", position = position_dodge(width = 0.75), hjust="left", vjust="middle", size=5/.pt) +
+        stat_summary(fun.data = function(x){
+          return(c(y = x[2] - 1, label = x[2]))
+        }, geom = "text", position = position_dodge(width = 0.75), hjust="right", vjust="middle", color="white", size=5/.pt) +  ylab("Timepoints") + 
+  xlab(NULL) +
+  theme(axis.text.y=element_blank(), 
+        axis.ticks.y = element_blank(), 
+        # plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        plot.margin = margin(1,1,0,0),
+        legend.background = element_blank()
+        ) 
+  
+
+ggp_venn
+
+#upset intersections
+dots_df <- venn_df %>% ungroup() %>% select(omics, total) %>% unique() %>% arrange(desc(total)) %>%
+  mutate(AMP = case_when(str_detect(omics, 'AMP') ~ 'AMP'),
+         MGX = case_when(str_detect(omics, 'MGX') ~ 'MGX'),
+         MTX = case_when(str_detect(omics, 'MTX') ~ 'MTX'),
+         QPCR = case_when(str_detect(omics, 'QPCR') ~ 'QPCR')) %>%
+  pivot_longer(AMP:last_col()) %>%
+  drop_na()
+
+
+
+head(dots_df)
+library(ghibli)
+ggp_dot <- ggplot(dots_df) +
+  geom_hline(aes(yintercept=omics), color='black', lwd=.3) +
+  geom_vline(aes(xintercept=value, color=value), lwd=.3)+
+  geom_point(aes(x=value, y=reorder(omics, total), fill=value), size=1, stroke=.3, shape=21) + 
+  # scale_colour_ghibli_d("LaputaMedium", direction = -1) +
+  # scale_fill_ghibli_d("LaputaMedium", direction = -1) +
+  scale_color_manual(values=c('#6a81a5','#a2bbd4', '#7ea679','#9fb3b6')) +
+  scale_fill_manual(values=c('#6a81a5','#a2bbd4', '#7ea679','#9fb3b6')) +
+  scale_x_discrete(position = "top", guide = guide_axis(angle = 90)) +
+  theme_nature() +
+  theme(axis.line.x = element_blank(),
+        axis.line.y = element_blank(),
+        # panel.background = element_rect(fill='grey98'),
+        axis.text.y=element_blank(), 
+        axis.ticks.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        # plot.margin = unit(c(0, 0, 0, 0), "cm"),
+        plot.margin = margin(1,0,1,0),
+        axis.title.y = element_blank(),
+        legend.position='none') +
+    xlab(NULL) 
+
+
+p_upset <- (ggp_dot + ggp_venn  + plot_layout(widths = c(1, 3)))
+p_upset
+p_upset_margin <- p_upset + theme(plot.margin = margin(5, 5, 5, 5))
+ggsave('figures/clinical_data/demographics_intersection.pdf',plot = p_upset, units='in', width=2.05, height=1.34)
+```
+```{r}
+library(ggh4x)
+pt_level_metadata <- permmeta %>%
+  select(script_id,Age,Binary_outcome,Ethnicity,Gender,Race,Smoking_status,Smoking_status,BMI,Admit_APS_score,Admit_APS_score,Admit_SOFA_score,Cumulative_ICU_days,Cumulative_intubation_days) %>% 
+  unique()
+
+pt_level_metadata_num <- pt_level_metadata %>% select(script_id, Binary_outcome,where(is.numeric)) %>% 
+  pivot_longer(3:last_col()) %>% 
+  group_by(name, Binary_outcome) %>%
+  add_tally(!is.na(value)) %>% #ungroup() %>%
+  mutate(outcome_label = case_when(Binary_outcome == 0 ~ paste0('- ', '(n=', as.character(n),')'),
+                                   Binary_outcome == 1 ~ paste0('+ ', '(n=', as.character(n),')'))) %>% 
+  mutate(n_val = case_when(Binary_outcome == 0 ~ paste0('n=', as.character(n)),
+                                   Binary_outcome == 1 ~ paste0('n=', as.character(n)))) %>% ungroup() %>% 
+  mutate(outcome = case_when(Binary_outcome == 0 ~ paste0('-'),
+                                   Binary_outcome == 1 ~ paste0('+'))) %>% 
+
+
+  ungroup() %>% 
+  mutate(name = str_replace_all(name, "_", " "),
+         name = str_replace(name, 'Cumulative', ''),
+         name = str_replace(name, 'intubation', 'Intubated'),
+         name = str_replace(name, ' score', '')
+         ) %>% 
+  filter(!script_id %in% c(REDACTEDA, REDACTEDB, REDACTEDC))
+
+n_fun <- function(x){
+  return(data.frame(y = max(x)+2, label = paste0("n = ",length(x))))
+}
+
+p_clinical <- ggplot(pt_level_metadata_num, aes(x=factor(outcome), y=value, fill=factor(outcome))) + 
+  geom_violin(trim=TRUE, linewidth=.3)+
+  geom_boxplot(width=0.1, fill="white", linewidth=.3, outlier.size = .5)+
+  facet_wrap2(~name, axes = 'all', scales = 'free_y', ncol=2,remove_labels = 'all') +
+  theme_nature() +
+  theme(
+        axis.title.x=element_text(size = 6),
+        strip.placement = 'outside',
+        strip.background = element_blank(),
+        strip.text.x = element_text(size = 4, face='bold',margin = margin(.75,0,0.5,0)),
+        panel.spacing = unit(.1, 'pt'),
+        legend.position = 'none'
+        )+
+  scale_y_continuous(breaks=scales::extended_breaks(6)) +
+  scale_fill_manual(values=list('-'="#799999", '+'="#999999")) +
+  guides(fill = guide_legend(title = "Clinical outcome")) +
+  ylab(NULL) +
+  xlab('Clinical outcome')
+
+
+p_clinical 
+ggsave("figures/clinical_data/violin_quantitative_clinical_distributions_by_outcome.pdf", units="in", height=2.52, width=1.84)
+```
+
+```{r}
+
+source('src/common/load_metadata.r')
+source('src/common/load_features.r')
+get_alpha()
+mox_diversity <- permmeta %>% select(sample_name, starts_with('shannon'))  %>% 
+  select(!shannon_mtx_mpa) %>% 
+  pivot_longer(2:last_col(), values_drop_na = T) %>% 
+  filter(name !='invsimpson_mgx_ko') %>% 
+  mutate(metaomic = case_when(name == "shannon_amp" ~ 'AMP',
+                              name == "shannon_amp_asv" ~ 'AMP',
+                              name %in% c("shannon_mgx_mpa", "shannon_mgx_pfam", "shannon_mgx_viral") ~ 'MGX',
+                              name %in% c("shannon_mtx_bkn", "shannon_mtx_mpa", 'shannon_htx', "shannon_mtx_pfam") ~ 'MTX'),
+         name = case_when(name == "shannon_amp" ~ 'AMP [Genus]',
+                          name == "shannon_amp_asv" ~ 'AMP [ASV]',
+                              name %in% c("shannon_mgx_mpa") ~ 'DNA [Taxonomy]',
+                              name %in% c("shannon_mgx_viral") ~ 'DNA [Viral]',
+                              name %in% c("shannon_mtx_bkn") ~ 'RNA [Taxonomy BKN]',
+                              name %in% c("shannon_mtx_mpa") ~ 'RNA [Taxonomy MPA]',
+                          name %in% c("shannon_mgx_pfam") ~ 'DNA [PFAM]',
+                          name %in% c("shannon_mtx_pfam") ~ 'RNA [PFAM]',
+                          name %in% c("shannon_htx") ~ 'RNA [Host Transcriptomics]',
+                          name %in% c("shannon_culture") ~ 'CFU [Culture]',
+
+
+                          )) %>% arrange(name)
+p_diversity<- ggplot(mox_diversity, aes(x=factor(name, levels=names(mox_feature_list)), y=value, fill=factor(metaomic))) + 
+  geom_violin(trim=T, linewidth=.3, scale='width')+
+  geom_boxplot(width=0.1, fill="white", linewidth=.3, outlier.size = .5)+
+  stat_summary(fun.data = n_fun, geom = "text", size = 5/.pt) + # to add n values
+  theme_nature() +
+  theme(
+        axis.title.x=element_blank(),
+        axis.text.x=element_text(angle=335,hjust=0),
+        panel.grid.major.x = element_line(colour="grey", linetype="dashed"),
+        plot.margin = margin(0, 1, 1, 1)
+        )+
+  scale_fill_manual(values=c('#6a81a5','#a2bbd4', '#7ea679','#9fb3b6')) +
+  guides(fill = guide_legend(title = "Meta-omic"))+
+  ylab('Shannon index')
+
+p_diversity + rotate_x_text(30) 
+
+ggsave("figures/overview_omics/shannon_all_omics.pdf", units="in", height=1.63, width=3.18)
+
+```
+
+```{r}
+qPCR_overview <- permmeta %>% 
+  mutate(outcome = case_when(Binary_outcome == 0 ~ paste0('Negative'),
+                                   Binary_outcome == 1 ~ paste0('Positive'))) %>% 
+  mutate(filler='qpcr') %>% 
+  ggplot(., aes(x=filler, y=Quantity.Mean.Log)) + #x=outcome
+  geom_violin(trim=FALSE, fill="#5C5992FF", linewidth=.3)+
+  geom_boxplot(width=0.1, fill="white", linewidth=.3)+
+  stat_summary(fun.data = n_fun, geom = "text", size = 2) + # to add n values
+  theme_nature() +
+  theme(
+        axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        panel.grid.major.y = element_line(colour="grey", linetype="dashed"),
+        plot.margin = margin(5, 5, 5, 5)
+        ) +
+  guides(fill = guide_legend(title = "Clinical outcome")) +
+  ylab('Log 16S copies/µL') +
+  scale_colour_ghibli_d("LaputaMedium", direction = -1)
+qPCR_overview
+ggsave("figures/overview_omics/qpcr_distribution.pdf", units="in", height=1.63 , width=1.77)
+
+```
+
+
+```{r}
+ggp_perm <- readRDS('objects/figure_objects/permanova_heat.rds') + theme(plot.margin = margin(1, 1, 0, 1)) +labs(x="", y="",fill="Variance Explained")
+ggp_mantel <- readRDS('objects/figure_objects/mantel_heat.rds') + theme(axis.title.x=element_blank(),axis.text.x=element_blank(),axis.ticks.x=element_blank())
+success_ord <- readRDS('objects/figure_objects/ordination_outcome.rds') #+ theme(plot.margin = margin(5, 5, 5, 5))
+
+
+```
+
+```{r}
+ggp_perm <- readRDS('objects/figure_objects/permanova_heat.rds') + 
+  theme(plot.margin = margin(1, 1, 0, 1), #  first one 5
+        # axis.text.x = element_blank(),
+        axis.line.y.right = element_blank(), 
+        axis.line.x.bottom = element_blank()
+        ) +
+  guides(color='none') +
+  labs(x="", y="",fill="Variance Explained")
+success_ord <- readRDS('objects/figure_objects/ordination_outcome.rds') + guides(shape='none')
+
+
+
+designr = '
+BBBBB#CCCCCCCCCC
+BBBBB#CCCCCCCCCC
+BBBBB#CCCCCCCCCC
+AAAAAACCCCCCCCCC
+AAAAAACCCCCCCCCC
+AAAAAACCCCCCCCCC
+AAAAAACCCCCCCCCC
+AAAAAACCCCCCCCCC
+AAAAAACCCCCCCCCC
+EEEEEECCCCCCCCCC
+EEEEEECCCCCCCCCC
+EEEEEECCCCCCCCCC
+EEEEEEDDDDDDDDDD
+EEEEEEDDDDDDDDDD
+EEEEEEDDDDDDDDDD
+'
+fig1 <-
+  p_clinical + #theme(plot.margin = margin(1,1,1,1)) +
+  p_upset + 
+  ggp_perm + #theme(plot.margin = margin(1,1,1,1)) +
+  p_diversity + 
+  free(success_ord + theme(strip.text.x.top=element_text(margin=margin(0,0,0,0)), legend.position='none')) + 
+  plot_layout(guides='collect', design=designr)+ plot_annotation(tag_levels = 'a')
+fig1 #& theme(plot.background = element_rect(color='blue'))
+
+ggsave('figures/clinical_data/figure1_demographics_overview_smaller.pdf', fig1,units="in", width=5.58, height=5.00)
+ggsave('figures/clinical_data/figure1_demographics_overview.pdf', fig1,units="in", width=7.05, height=5.76)
+
+```
+

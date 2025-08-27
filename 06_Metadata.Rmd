@@ -1,0 +1,628 @@
+---
+title: "Metadata"
+output:
+  html_document:
+    df_print: paged
+editor_options: 
+  chunk_output_type: console
+---
+# Load
+Mostly an exploratory analysis but also some temporal dynamics stuff
+```{r}
+
+source("src/common/feature_tables_functions.r")
+source('src/common/load_metadata.r')
+source('src/common/load_lists.r')
+source('src/common/nature_theme.r')
+source('src/common/get_clusters.r')
+
+library(tidyverse)
+library(colorspace)
+library(ggh4x)
+```
+## Boxplots
+```{r}
+ggplot(permmeta, aes(x=Episode_etiology, y=amylase_bf_log, fill=Episode_etiology, colour=Episode_etiology)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  theme(axis.text.x=element_text(angle=335,hjust=0),
+        # aspect.ratio = 1
+        ) +
+  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_etiology']], darken, amount=.4))) +
+  labs(x='Pneumonia subtype', y=bquote(log[10]~"(amylase U)"))
+
+ggsave('figures/boxplots_exploratory/boxplot_subtype_amylase.pdf', width=2.74, height=1.91, units='in')
+```
+
+```{r}
+ggplot(permmeta, aes(x=Episode_is_cured, y=amylase_bf_log, fill=Episode_etiology, colour=Episode_etiology)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  theme(axis.text.x=element_text(angle=335,hjust=0),
+        aspect.ratio = 1.5) +
+  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_etiology']], darken, amount=.4))) +
+  labs(x='Pneumonia resolution', y=bquote(log[10]~"(amylase U)")) +
+  ggtitle("Baseline and BAL samples")
+
+ggsave('figures/boxplots_exploratory/boxplot_Episode_is_cured_subtype_amylase.pdf', width=2.72, height=2.64, units='in')
+
+```
+```{r}
+permmeta %>% filter(baseline_or_bal == 'Baseline') %>%
+ggplot(aes(x=Episode_etiology, y=Quantity.Mean.Log, fill=Episode_etiology, colour=Episode_etiology)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  theme(axis.text.x=element_text(angle=335,hjust=0)) +
+  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_etiology']], darken, amount=.4))) +
+  labs(x='Pneumonia subtype', y=bquote(log[10]~"(16S rRNA gene copies"~mu*L^-1*")")) +
+  ggtitle("Only baseline samples")
+
+ggsave('figures/boxplots_exploratory/boxplot_subtype_qpcr.pdf', width=2.72, height=2.64, units='in')
+
+```
+```{r}
+permmeta %>% filter(baseline_or_bal == 'Baseline') %>%
+ggplot(aes(x=Episode_is_cured, y=Quantity.Mean.Log, fill=Episode_etiology, colour=Episode_etiology)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  theme(aspect.ratio = 1.5) +
+  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_etiology']], darken, amount=.4))) +
+  labs(x='Pneumonia resolution', y=bquote(log[10]~"(16S rRNA gene copies"~mu*L^-1*")")) +
+  rotate_x_text(30)+
+  ggtitle("Only baseline samples")
+
+ggsave('figures/boxplots_exploratory/boxplot_Episode_is_cureds_subtype_amylase.pdf', width=2.53, height=2.28, units='in')
+```
+```{r}
+permmeta %>% filter(baseline_or_bal == 'Baseline') %>%
+ggplot(aes(x=Episode_category, y=Quantity.Mean.Log, fill=Episode_category, colour=Episode_category)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  # theme(aspect.ratio = 1.5) +
+  scale_fill_manual(values=mox_color_lists[['Episode_category']]) +
+  scale_colour_manual(values=darken(mox_color_lists[['Episode_category']], amount = .4)) +
+  labs(y=bquote(log[10]*"(16S rRNA gene copies"~mu*L^-1*")"), x='Disease state') +
+  ggtitle("Only baseline samples")
+  # facet_wrap2(~Episode_is_cured, nrow = 1, scales = 'free_x',axes='all', remove_labels = "all")
+
+ggsave('figures/boxplots_exploratory/boxplot_category_amylase.pdf',  width=2.53, height=2.28, units='in')
+```
+
+```{r}
+permmeta %>% 
+ggplot(aes(x=Episode_etiology, y=neutrophils_bodyfluid, fill=Episode_etiology, colour=Episode_etiology)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  theme(axis.text.x=element_text(angle=335,hjust=0),
+        # aspect.ratio = 1.5
+        ) +
+  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_etiology']], darken, amount=.4))) +
+  labs(x='Pneumonia subtype', y='Neutrophil level BAL (%)')
+ggsave('figures/boxplots_exploratory/boxplot_subtype_neutrophil.pdf',  width=2.53, height=2.28, units='in')
+
+permmeta %>% 
+ggplot(aes(x=Episode_etiology, y=Neutrophils, fill=Episode_etiology, colour=Episode_etiology)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  theme(axis.text.x=element_text(angle=335,hjust=0),
+        # aspect.ratio = 1.5
+        ) +
+  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_etiology']], darken, amount=.4))) +
+  labs(x='Pneumonia subtype', y='Neutrophil level peripheral (%)')
+ggsave('figures/boxplots_exploratory/boxplot_subtype_neutrophil_peripheral.pdf',  width=2.53, height=2.28, units='in')
+```
+```{r}
+# TODO wbc_count to macrophage body fluid not blood carpe diem vallue
+
+permmeta %>% 
+ggplot(aes(x=Episode_etiology, y=WBC_count, fill=Episode_etiology, colour=Episode_etiology)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  theme(axis.text.x=element_text(angle=335,hjust=0),
+        # aspect.ratio = 1.5
+        ) +
+  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_etiology']], darken, amount=.4))) +
+  labs(x='Pneumonia subtype', y='Peripheral White Blood Cells (%)')
+
+ggsave('figures/boxplots_exploratory/boxplot_subtype_macrophage.pdf',  width=2.53, height=2.28, units='in')
+
+```
+```{r}
+permmeta %>%
+ggplot(aes(x=Episode_etiology, y=dysbiosis_score, fill=Episode_etiology, colour=Episode_etiology)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  theme(axis.text.x=element_text(angle=335,hjust=0),
+        # aspect.ratio = 1.5
+        ) +
+  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_etiology']], darken, amount=.4))) +
+  labs(x='Pneumonia subtype', y='MDNP score')
+ ggsave('figures/boxplots_exploratory/boxplot_subtype_dysbiosis.pdf', width=2.53, height=2.53, units='in')
+
+```
+```{r}
+permmeta %>%
+  filter(Episode_category != 'NPC') %>% 
+  drop_na(Episode_etiology) %>%
+  ggplot(aes(x=Episode_is_cured, y=dysbiosis_score, fill=Episode_etiology, colour=Episode_etiology)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.8) +
+  theme_nature() +
+  theme(aspect.ratio = 1.5) +
+  scale_fill_manual(values=mox_color_lists[['Episode_etiology']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_etiology']], darken, amount=.4))) +
+  labs(x='Pneumonia resolution', y='MDNP score') + 
+  facet_wrap2(~Episode_etiology, ncol = 4, scales = 'free_x',axes='all', 
+              remove_labels = "all") +
+  rotate_x_text(30) +
+  ggtitle("Baseline and BAL samples")
+
+ggsave('figures/boxplots_exploratory/boxplot_subtype_Episode_is_cured_dysbiosis.pdf', width=4.55, height=1.97, units='in')
+
+```
+
+```{r}
+permmeta %>% 
+  filter(Episode_category != 'NPC') %>% 
+  drop_na(Episode_is_cured) %>% 
+  ggplot(aes(x=Episode_is_cured, y=dysbiosis_score, fill=Episode_category, colour=Episode_category)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  theme(aspect.ratio = 1.5) +
+  scale_fill_manual(values=mox_color_lists[['Episode_category']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_category']], darken, amount = .4))) +
+  labs(x='Pneumonia subtype', y='MDNP score') + 
+  facet_wrap2(~Episode_category, ncol = 3, scales = 'free_x',axes='all', remove_labels = "all") +
+  rotate_x_text(30) +
+  ggtitle("Baseline and BAL samples")
+
+ggsave('figures/boxplots_exploratory/boxplot_category_Episode_is_cured_dysbiosis.pdf', width=4.01, height=1.96, units='in')
+
+```
+
+```{r}
+permmeta %>% 
+  drop_na(Episode_is_cured, dysbiosis_score) %>% 
+ggplot(aes(x=Episode_is_cured, y=dysbiosis_score, fill=Episode_is_cured, colour=Episode_is_cured)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21,linewidth=.2, outlier.shape = NA, alpha=.9) +
+  theme_nature() +
+  theme(aspect.ratio = 1.5)+
+  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']]) +
+  scale_colour_manual(values=darken(mox_color_lists[['Episode_is_cured']], amount = .4)) +
+  labs(x='Pneumonia resolution', y='MDNP score')+
+    rotate_x_text(30) +
+  ggtitle("Baseline and BAL samples")
+
+ggsave('figures/boxplots_exploratory/boxplot_Episode_is_cured_dysbiosis.pdf', width=2.17, height=1.96, units='in')
+
+```
+```{r}
+permmeta %>% 
+  # filter(baseline_or_bal == 'Baseline') %>%
+  drop_na(Episode_category, dysbiosis_score) %>% 
+ggplot(aes(x=Episode_category, 
+           y=dysbiosis_score, 
+           fill=Episode_category, 
+           colour=Episode_category)) +
+  geom_jitter(height = 0, alpha=1, size=.1) +
+  geom_boxplot(shape=21, 
+               linewidth=.2, 
+               outlier.shape = NA, 
+               alpha=.9) +
+  theme_nature() +
+  theme(aspect.ratio = 1.75)+
+  scale_fill_manual(values=mox_color_lists[['Episode_category']]) +
+  scale_colour_manual(values=unlist(lapply(mox_color_lists[['Episode_category']], darken,
+                                    amount = .4))) +
+  labs(x='Pneumonia category', y='MDNP score') +
+  ggtitle("Baseline and BAL samples")
+
+ggsave('figures/boxplots_exploratory/boxplot_Episode_is_cured_category_dysbiosis_notfacet.pdf', 
+       width=2.17, height=1.96, units='in')
+
+```
+## Timeline
+```{r}
+source('src/common/load_metadata.r')
+source('src/common/get_clusters.r')
+
+longitudinal_samples <- permmeta %>% 
+  filter(initial_bal_sample == 0) %>% 
+  pluck('script_id') %>% 
+  unique()
+
+permmeta %>% 
+  filter(script_id %in% longitudinal_samples,
+         Episode_category!='NPC', 
+         !script_id %in% c(REDACTEDA, REDACTEDB, REDACTEDC)) %>%
+  mutate(bal_order = case_when(
+    initial_bal_sample == '1' ~ 0,
+    T ~ bal_order)) %>%
+  arrange(Episode_is_cured) %>%
+ggplot(aes(x=(days_since_bal), 
+           y=dysbiosis_score, 
+           color=Episode_is_cured, 
+           fill=Episode_is_cured)) +
+  geom_point(size=.4, alpha=.3) +
+  geom_line(aes(group=script_id), alpha=.3) +
+  geom_smooth(method='lm', 
+                linewidth=.25, 
+                alpha=.2,
+                formula = y~log10(x+1), 
+                fill='grey',
+                fullrange = TRUE, 
+                se=F, 
+                linetype = "dashed") +
+  geom_smooth(method='lm', 
+                linewidth=.3, 
+                alpha=.2,
+                formula = y~log10(x+1), 
+                fill='grey') +
+  theme_nature() +
+  theme(aspect.ratio = 1)+
+  facet_wrap2(~Episode_category, 
+              nrow = 1, 
+              scales = 'fixed',
+              axes='all', 
+              remove_labels = "all") +
+  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']]) +
+  scale_colour_manual(values=mox_color_lists[['Episode_is_cured']]) +
+  labs(y='MDNP score', 
+       x='Days since first BAL', 
+       title='Median')+
+  stat_cor(aes(label = paste(..r.label.., 
+                             ..p.label.., 
+                             sep = "~`,`~")), 
+           p.accuracy = 0.001, 
+           size=4/.pt,label.x.npc = 'left',
+           label.y.npc='top',
+           cor.coef.name='rho',
+           method='spearman')
+
+ggsave('figures/timeseries_disance/timeseries_Episode_is_cured_median.pdf', 
+       width=4.56, height=1.83, units='in')
+```
+```{r}
+## From baseline
+minimal_permmeta <- permmeta %>% select(sample_name, script_id, initial_bal_sample,cluster_num_amplicon)
+unif.pairwise.all<-
+  mox_dist_list[['AMP [Genus]']] %>% 
+  as.matrix() %>%
+  as_tibble(rownames = "Sample.x") %>%
+  pivot_longer(cols = 2:last_col(), names_to = "Sample.y", values_to = "UniFrac") %>%
+  left_join(permmeta, by = c("Sample.x"="sample_name" )) %>%
+  left_join(minimal_permmeta, by = c("Sample.y"="sample_name" )) 
+
+  
+unif.timeline <- unif.pairwise.all %>%
+  filter(initial_bal_sample.y == 1,
+         script_id.y == script_id.x)
+
+baseline_plot_df <- unif.timeline %>% 
+  filter(script_id.x %in% longitudinal_samples, 
+         Episode_category %in% c("HAP", "VAP", 'CAP'),
+         Episode_is_cured!=2) %>%
+  mutate(bal_order = case_when(initial_bal_sample.x == '1' ~ 0,
+                   T ~ bal_order)) %>%
+  arrange(Episode_is_cured) 
+
+baseline_plot_df %>% 
+  count(Episode_category, Episode_is_cured)
+
+baseline_plot <-
+  ggplot(baseline_plot_df, 
+         aes(x=days_since_bal, 
+             y=UniFrac, 
+             fill=Episode_category, 
+             color=Episode_category, 
+             group=Episode_category)) + 
+    geom_point(alpha=.2, size=.4) +
+    geom_line(aes(group=script_id.x),alpha=.2,linewidth=.2) +
+    geom_smooth(method='lm', 
+                linewidth=.25, 
+                alpha=.2,
+                formula = y~log10(x+1), 
+                fill='grey',
+                fullrange = TRUE, 
+                se=F, 
+                linetype = "dashed") +
+    geom_smooth(method='lm', 
+                linewidth=.3, 
+                alpha=.2,
+                formula = y~log10(x+1), 
+                fill='grey') +
+    theme_nature() +
+    theme(aspect.ratio = 1)+
+    facet_wrap2(~Episode_category, 
+                nrow = 1, 
+                scales = 'fixed',
+                axes='all', 
+                remove_labels = "all") +
+    scale_fill_manual(values=mox_color_lists[['Episode_category']]) +
+    scale_colour_manual(values=mox_color_lists[['Episode_category']]) +
+    labs(y='Distance from baseline',
+         x='Days since first BAL', 
+         title='Baseline')+
+    stat_cor(aes(label = paste(..r.label.., 
+                               ..p.label.., 
+                               sep = "~`,`~")), 
+             p.accuracy = 0.001, 
+             size=5/.pt,
+             label.x.npc = 'left', 
+             label.y = .8,
+             cor.coef.name='rho',
+             method='spearman')
+
+baseline_plot # not split
+ ggsave('figures/timeseries_disance/timeseries_Episode_etiology_baseline.pdf', 
+        width=4.07, height=1.67, units='in')
+
+
+baseline_plot <-
+  ggplot(baseline_plot_df, 
+         aes(x=days_since_bal, 
+             y=UniFrac, 
+             fill=Episode_is_cured, 
+             color=Episode_is_cured, 
+             group=Episode_is_cured)) + 
+    geom_point(alpha=.2, size=.4) +
+    geom_line(aes(group=script_id.x),
+              alpha=.2,
+              linewidth=.2) +
+    geom_smooth(method='lm', 
+                linewidth=.25, 
+                alpha=.2,formula = y~log10(x+1), 
+                fill='grey',
+                fullrange = TRUE, 
+                se=F, 
+                linetype = "dashed") +
+    geom_smooth(method='lm', 
+                linewidth=.3, 
+                alpha=.2,
+                formula = y~log10(x+1), 
+                fill='grey') +
+    theme_nature() +
+    theme(aspect.ratio = 1)+
+    facet_wrap2(~Episode_category, 
+                nrow = 1, scales = 'fixed',
+                axes='all', 
+                remove_labels = "all") +
+    scale_fill_manual(values=mox_color_lists[['Episode_is_cured']]) +
+    scale_colour_manual(values=mox_color_lists[['Episode_is_cured']]) +
+    labs(y='Distance from baseline',
+         x='Days since first BAL', title='Baseline')+
+    stat_cor(aes(label = paste(..r.label.., 
+                               ..p.label..,
+                               sep = "~`,`~")), 
+             p.accuracy = 0.001, 
+             size=5/.pt,
+             label.x.npc = 'left', 
+             label.y.npc='top',
+             cor.coef.name='rho',
+             method='spearman') #, label.y= .6)  
+
+
+baseline_plot + ylim(0,1)
+ ggsave('figures/timeseries_disance/timeseries_Episode_is_cured_baseline.pdf', 
+        width=4.07, height=1.67, units='in')
+```
+
+### Cluster Baseline plot
+```{r}
+# Cluster Baseline plot
+  ggplot(baseline_plot_df, 
+         aes(x=days_since_bal, 
+             y=UniFrac, 
+             fill=cluster_num_amplicon.y, 
+             color=cluster_num_amplicon.y, 
+             group=cluster_num_amplicon.y)) + 
+  geom_point(alpha=.1, size=.4) +
+  geom_line(aes(group=script_id.x),
+            alpha=.1,
+            linewidth=.2) +
+  geom_smooth(method='lm', 
+              linewidth=.25, 
+              alpha=.2,
+              formula = y~log10(x+1), 
+              fill='grey',
+              fullrange = TRUE, 
+              se=F, 
+              linetype = "dashed") +
+  geom_smooth(method='lm', 
+              linewidth=.3, 
+              alpha=.2,
+              formula = y~log10(x+1), 
+              fill='grey') +
+  theme_nature() +
+  theme(aspect.ratio = 1)+
+  facet_wrap2(~cluster_num_amplicon.y, 
+              nrow = 1, 
+              scales = 'fixed',
+              axes='all', 
+              remove_labels = "all") +
+  scale_fill_manual(
+    values=mox_color_lists[['cluster_num_amplicon']]) +
+  scale_colour_manual(
+    values=mox_color_lists[['cluster_num_amplicon']]) +
+  labs(y='Distance from baseline',
+       x='Days since first BAL'
+       )+
+  stat_cor(aes(label = paste(..r.label.., 
+                             ..p.label.., 
+                             sep = "~`,`~")), 
+           p.accuracy = 0.001, 
+           size=4/.pt,
+           label.x.npc = 'left', 
+           label.y= .8,
+           cor.coef.name='rho',
+           method='spearman') +
+  labs(color='State', fill='State')
+ ggsave('figures/timeseries_disance/timeseries_cluster_baseline.pdf', 
+        width=3.77, height=1.45, units='in', device=cairo_pdf)
+
+```
+
+```{r}
+## From previous/sliding window
+minimal_permmeta <- permmeta %>% select(sample_name, script_id, initial_bal_sample, bal_order)
+unif.pairwise.all<-
+  mox_dist_list[['AMP [Genus]']] %>% 
+  as.matrix() %>%
+  as_tibble(rownames = "Sample.x") %>%
+  pivot_longer(cols = 2:last_col(), names_to = "Sample.y", values_to = "UniFrac") %>%
+  left_join(permmeta, by = c("Sample.x"="sample_name" )) %>%
+  left_join(minimal_permmeta, by = c("Sample.y"="sample_name" )) 
+
+
+unif.timeline <- unif.pairwise.all %>%
+  mutate(bal_order.x = case_when(initial_bal_sample.x == '1' ~ 0,
+                   T ~ bal_order.x),
+         bal_order.y = case_when(initial_bal_sample.y == '1' ~ 0,
+                   T ~ bal_order.y), .before = UniFrac) %>%
+  filter(script_id.y == script_id.x,
+         case_when((bal_order.y == 0 & bal_order.x == 0) ~ T,
+                   bal_order.y == (bal_order.x-1) ~ T,
+                   bal_order.x <= bal_order.y ~ F))
+
+unif.timeline %>% 
+  filter(script_id.x %in% longitudinal_samples, 
+         Episode_category %in% c("HAP", "VAP", 'CAP')) %>%
+  # mutate(Episode_is_cured = as.factor(Episode_is_cured)) %>%
+  ggplot(., aes(x=days_since_bal, y=UniFrac, color=Episode_is_cured, group=Episode_is_cured)) + 
+    geom_point(alpha=.2, size=.4) +
+    geom_line(aes(group=script_id.x),alpha=.2,linewidth=.2) +
+    geom_smooth(method='lm', 
+                linewidth=.25, 
+                alpha=.2,
+                formula = y~log10(x+1), 
+                fill='grey',
+                fullrange = TRUE, 
+                se=F, 
+                linetype = "dashed") +
+    geom_smooth(method='lm', 
+                linewidth=.3, 
+                alpha=.2,
+                formula = y~log10(x+1), 
+                fill='grey') +
+    theme_nature() +
+    theme(aspect.ratio = 1)+
+    facet_wrap2(~Episode_category, nrow = 1, scales = 'fixed',axes='all', remove_labels = "all") +
+    scale_fill_manual(values=mox_color_lists[['Episode_is_cured']]) +
+    scale_colour_manual(values=mox_color_lists[['Episode_is_cured']]) +
+    labs(y='Distance from previous BAL', x='Days since first BAL', title='Sliding window')+
+    stat_cor(aes(label = paste(..r.label.., 
+                               ..p.label.., 
+                               sep = "~`,`~")),
+             p.accuracy = 0.001, 
+             size=4/.pt,
+             label.x.npc = 'center',
+             label.y.npc='bottom',
+             cor.coef.name='rho',
+             method='spearman')
+
+ggsave('figures/timeseries_disance/timeseries_Episode_is_cured_sliding.pdf' , width=3.77, height=1.45, units='in')
+
+```
+
+
+```{r}
+## From previous/sliding window
+minimal_permmeta <- permmeta %>% select(sample_name, script_id, Episode_category,Episode_is_cured)
+unif.pairwise.all<-
+  mox_dist_list[["AMP [ASV]"]] %>% 
+  as.matrix() %>%
+  as_tibble(rownames = "Sample.x") %>%
+  pivot_longer(cols = 2:last_col(), names_to = "Sample.y", values_to = "UniFrac") %>%
+  left_join(permmeta, by = c("Sample.x"="sample_name" )) %>%
+  left_join(minimal_permmeta, by = c("Sample.y"="sample_name" )) %>% rename(Episode_is_cured='Episode_is_cured.x')
+
+norm_scale<- function(x, xmin, xmax){
+  norm_value <- (x-xmin)/(xmax-xmin)
+  return(norm_value)
+}
+unif.timeline <- unif.pairwise.all %>%
+  filter(Episode_category.y == 'NPC',
+         ) %>%
+  group_by(script_id.x) %>%
+  mutate(days_since_bal_norm = (days_since_bal - min(days_since_bal))/(max(days_since_bal)-min(days_since_bal))) %>%
+  ungroup()
+
+
+unif.timeline %>% 
+  filter(script_id.x %in% longitudinal_samples, 
+         Episode_category.x %in% c("HAP", "VAP", 'CAP'),
+         Episode_is_cured!=2) %>%
+  ggplot(., aes(x=days_since_bal, y=UniFrac, fill=Episode_is_cured, color=Episode_is_cured, group=Episode_is_cured)) + 
+    geom_point(alpha=.05, size=.5) +
+    geom_line(aes(group=script_id.x),alpha=.05,linewidth=.2) +
+    geom_smooth(method='lm', linewidth=.4, alpha=.3,formula = y~(x)) +
+    theme_nature() +
+    theme(aspect.ratio = 1)+
+    facet_wrap2(~Episode_category.x, nrow = 1, scales = 'free_x',axes='all', remove_labels = "all") +
+    scale_fill_manual(values=mox_color_lists[['Episode_is_cured']]) +
+    scale_colour_manual(values=mox_color_lists[['Episode_is_cured']]) +
+    labs(y='Pairwise UniFrac\ndistance from NPC', x = 'Days since first BAL', title='Pairwise') + #+ xlim(0,1) +
+    stat_cor(aes(label = paste(..r.label.., ..p.label.., sep = "~`,`~")),
+               p.accuracy = 0.001, size=4/.pt,label.x.npc = 'center',label.y.npc='top',
+           cor.coef.name='rho',
+           method='spearman')
+
+ggsave('figures/timeseries_disance/timeseries_Episode_is_cured_pairwise_asv.pdf', width=3.77, height=1.45, units='in')
+
+unif.timeline %>% 
+  filter(script_id.x %in% longitudinal_samples, 
+         Episode_category.x %in% c("HAP", "VAP", 'CAP')) %>%
+  ggplot(., aes(x=days_since_bal, y=UniFrac, fill=Episode_is_cured, color=Episode_is_cured, group=Episode_is_cured)) + 
+  geom_smooth(method='lm', linewidth=.4, alpha=.3) +
+  theme_nature() +
+  theme(aspect.ratio = 1)+
+  facet_wrap2(~Episode_category.x, nrow = 1, scales = 'free',axes='all', remove_labels = "all") +
+  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']]) +
+  scale_colour_manual(values=mox_color_lists[['Episode_is_cured']]) +
+  labs(y='Pairwise UniFrac\ndistance from NPC', x = 'Days since first BAL', title='Pairwise') +
+  stat_cor(aes(label = paste(..r.label.., ..p.label.., sep = "~`,`~")), p.accuracy = 0.001, size=5/.pt,
+           cor.coef.name='rho',
+           method='spearman')  
+
+ggsave('figures/timeseries_disance/timeseries_Episode_is_cured_pairwise_nopoints_ASV.pdf', width=3.77, height=1.45, units='in')
+
+```
+```{r}
+unif.timeline %>% 
+  filter(script_id.x %in% longitudinal_samples, 
+         Episode_category.x %in% c("HAP", "VAP", 'CAP')) %>%
+  # mutate(Episode_is_cured = as.factor(Episode_is_cured)) %>%
+  ggplot(., aes(x=bal_order, y=UniFrac, fill=Episode_is_cured, color=Episode_is_cured, group=Episode_is_cured)) + 
+  geom_point(alpha=.1) +
+  geom_line(aes(group=script_id.x), linewidth=.3, alpha=.2) +
+  geom_smooth(method='lm') +
+  # geom_line(aes(group=script_id.x)) +
+  theme_nature() +
+  theme(aspect.ratio = 1)+
+  facet_wrap2(~Episode_category.x, nrow = 1, scales = 'free',axes='all', remove_labels = "all") +
+  scale_fill_manual(values=mox_color_lists[['Episode_is_cured']]) +
+  scale_colour_manual(values=mox_color_lists[['Episode_is_cured']]) +
+  labs(y='Pairwise UniFrac\ndistance from NPC') +
+  stat_cor(aes(label = paste(..r.label.., ..p.label.., sep = "~`,`~")), p.accuracy = 0.001, size=5/.pt,
+           cor.coef.name='rho',
+           method='spearman')
+```
